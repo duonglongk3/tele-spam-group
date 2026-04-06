@@ -1,0 +1,4 @@
+
+> telegram-auto-post-tool@1.0.0 typecheck
+> tsc --noEmit
+
