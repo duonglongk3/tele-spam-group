@@ -47,7 +47,7 @@ export const telegramApi = {
   validateCampaign: (accountId: string, campaignPayload: any, targetsCache: any[]) =>
     ipc('telegram:validateCampaign', { accountId, campaignPayload, targetsCache }),
 
-  // ─── Campaign (MongoDB) ─────────────────────────────
+  // ─── Campaign (SQLite) ─────────────────────────────
   getCampaigns: () => ipc('campaign:findAll'),
   getCampaignProgress: () => ipc('campaign:getProgress'),
   saveCampaign: (data: any) => ipc('campaign:save', data),

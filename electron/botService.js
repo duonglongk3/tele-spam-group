@@ -139,7 +139,7 @@ async function initBot() {
       await c.save();
       ctx.reply(`🔴 Đã DỪNG chiến dịch: ${c.name}`);
     } catch(e) {
-      if (e.name === 'CastError') return ctx.reply('ID không đúng định dạng MongoDB ObjectId');
+      if (e.name === 'CastError') return ctx.reply('ID chiến dịch không đúng định dạng');
       ctx.reply('Lỗi: ' + e.message);
     }
   });

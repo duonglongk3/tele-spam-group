@@ -106,7 +106,7 @@ class TelegramMultiClient {
 
     async _saveAccounts() {
         try {
-            // Upsert all accounts in memory to MongoDB
+            // Upsert all accounts in memory to SQLite
             for (const account of this.accounts.values()) {
                 await TelegramAccount.findOneAndUpdate(
                     { accountId: account.id },

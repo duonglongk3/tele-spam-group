@@ -175,7 +175,7 @@ class AutoPostManager {
                 }
                 
                 if (needsSave) {
-                    await camp.save(); // Sync the new nextRunAt to MongoDB persistently
+                    await camp.save(); // Persist nextRunAt vào SQLite
                 }
             }
 

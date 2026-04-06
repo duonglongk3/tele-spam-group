@@ -360,11 +360,13 @@ ipcMain.handle(
   },
 );
 
-// IPC: Post Campaigns (MongoDB)
+// IPC: Post Campaigns (SQLite)
 ipcMain.handle("campaign:findAll", async () => {
   const PostCampaign = require("./models/PostCampaign");
   try {
-    const campaigns = await PostCampaign.find().sort({ createdAt: -1 });
+    const campaigns = (await PostCampaign.find()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
     return { success: true, campaigns: JSON.parse(JSON.stringify(campaigns)) };
   } catch (err) {
     return { success: false, error: err.message };
@@ -534,7 +536,10 @@ ipcMain.handle("settings:get", async () => {
         "admin_" + Math.random().toString(36).substring(2, 10);
       await s.save();
     }
-    return { success: true, settings: s ? s.toObject() : null };
+    return {
+      success: true,
+      settings: s ? (typeof s.toObject === "function" ? s.toObject() : s) : null,
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -549,7 +554,10 @@ ipcMain.handle("settings:save", async (_, data) => {
       Object.assign(s, data);
     }
     await s.save();
-    return { success: true, settings: s.toObject() };
+    return {
+      success: true,
+      settings: typeof s.toObject === "function" ? s.toObject() : s,
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }
