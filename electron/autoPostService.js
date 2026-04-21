@@ -1,8 +1,9 @@
 const telegramService = require('./telegramService');
 const PostLog = require('./models/PostLog');
 const PostCampaign = require('./models/PostCampaign');
-const { notifyAdmin } = require('./botService');
+const { notifyAdmin, getBot } = require('./botService');
 const cron = require('node-cron');
+const { Button } = require('telegram/tl/custom/button');
 
 function escapeHtml(text) {
   if (!text) return '';
@@ -67,6 +68,66 @@ function getNextFixedTime(timesArr, referenceDate = new Date()) {
     return next;
 }
 
+function toValidDate(value) {
+    if (!value) return null;
+    if (value instanceof Date) {
+        return Number.isNaN(value.getTime()) ? null : value;
+    }
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getInputFileFromMessage(message) {
+    if (!message?.media) return null;
+    if (message.media.photo) {
+        return message.media.photo;
+    }
+    if (message.media.document) {
+        return message.media.document;
+    }
+    return null;
+}
+
+function buildReplyMarkup(actionButtons = []) {
+    const validButtons = actionButtons
+        .filter((button) => button?.text && button?.url)
+        .slice(0, 2);
+
+    if (validButtons.length === 0) {
+        return undefined;
+    }
+
+    return [validButtons.map((button) => Button.url(button.text, button.url))];
+}
+
+function appendActionLinks(text, actionButtons = [], parseMode = 'md') {
+    const validButtons = actionButtons
+        .filter((button) => button?.text && button?.url)
+        .slice(0, 2);
+
+    if (validButtons.length === 0) {
+        return text;
+    }
+
+    const suffix = parseMode === 'html'
+        ? validButtons.map((button) => `<a href="${escapeHtml(button.url)}">${escapeHtml(button.text)}</a>`).join(' | ')
+        : validButtons.map((button) => `[${button.text}](${button.url})`).join(' | ');
+
+    return `${text}\n\n${suffix}`;
+}
+
+function getDelayMins(delayStr) {
+    if (typeof delayStr === 'number') return Math.max(1, delayStr);
+    if (typeof delayStr === 'string' && delayStr.includes('-')) {
+        const [min, max] = delayStr.split('-').map(Number);
+        if (!isNaN(min) && !isNaN(max) && max >= min) {
+            return Math.floor(Math.random() * (max - min + 1)) + min;
+        }
+    }
+    const val = Number(delayStr);
+    return !isNaN(val) && val > 0 ? val : 5;
+}
+
 class AutoPostManager {
     constructor() {
         this.timers = new Map(); // key: targetKey (campaignId:targetId:accountId)
@@ -97,85 +158,96 @@ class AutoPostManager {
             let executionDelayOffset = 0; // Spike guard for missed targets
 
             for (const camp of activeCampaigns) {
-                const globalSchedule = parseSchedule(camp.schedule);
-                const accountIds = camp.accounts && camp.accounts.length > 0 ? camp.accounts : [];
+                const maxPosts = (typeof camp.maxPostsPerDay === 'number' && camp.maxPostsPerDay > 0) ? camp.maxPostsPerDay : 3;
                 let needsSave = false;
 
-                for (const accId of accountIds) {
-                    for (const target of camp.targets) {
-                        if (target.isDisabled) continue;
-                        const targetKey = `${camp._id}:${target.chatId}:${target.topicId || '0'}:${accId}`;
-                        activeTargetKeys.add(targetKey);
+                const validTargets = camp.targets.filter(t => !t.isDisabled);
+                if (validTargets.length === 0) continue;
 
-                        let sched = globalSchedule;
-                        if (target.scheduleType === 'random' && target.customSchedule) {
-                            sched = parseSchedule(target.customSchedule) || globalSchedule;
-                        } else if (target.scheduleType === 'fixed' && target.customSchedule) {
-                            sched = parseSchedule(target.customSchedule) || globalSchedule;
+                // 1. Heal and sort the belt
+                validTargets.sort((a, b) => {
+                    const timeA = a.nextRunAt ? new Date(a.nextRunAt).getTime() : 0;
+                    const timeB = b.nextRunAt ? new Date(b.nextRunAt).getTime() : 0;
+                    return timeA - timeB;
+                });
+
+                let beltTime = Date.now();
+                for (const t of validTargets) {
+                    const currentRunTime = t.nextRunAt ? new Date(t.nextRunAt).getTime() : 0;
+                    if (currentRunTime < beltTime) {
+                        t.nextRunAt = new Date(beltTime);
+                        needsSave = true;
+                    }
+                    beltTime = new Date(t.nextRunAt).getTime() + (getDelayMins(camp.delayBetweenPosts) * 60000);
+                }
+
+                // 2. Execute & Slide
+                for (const target of validTargets) {
+                    const accId = target.accountId || (camp.accounts && camp.accounts.length > 0 ? camp.accounts[0] : 'bot');
+                    const targetKey = `${camp._id}:${target.chatId}:${target.topicId || '0'}:${accId}`;
+                    activeTargetKeys.add(targetKey);
+
+                    // Allow 5-second drift
+                    if (new Date(target.nextRunAt).getTime() <= Date.now() + 5000) {
+                        // Check daily limits
+                        const todayStr = new Date().toISOString().split('T')[0];
+                        if (target.dailySentDate !== todayStr) {
+                            target.dailySentCount = 0;
+                            target.dailySentDate = todayStr;
+                            needsSave = true;
                         }
 
-                        if (!sched) continue;
+                        if (target.dailySentCount >= maxPosts) {
+                            // Hit limit, schedule for tomorrow
+                            const tomorrow = new Date();
+                            tomorrow.setDate(tomorrow.getDate() + 1);
+                            tomorrow.setHours(0, 0, 0, 0);
 
-                        if (!target.nextRunAt) {
-                            if (sched.type === 'fixed') {
-                                target.nextRunAt = getNextFixedTime(sched.times, new Date());
-                                console.log(`[AutoPost] Initialized FIXED schedule for ${target.name} at ${target.nextRunAt}`);
-                                needsSave = true;
-                                this.nextRunTimes.set(targetKey, target.nextRunAt.getTime());
-                            } else if (sched.type === 'random') {
-                                // First run init dispatcher to prevent Spikes
-                                const targetIndex = camp.targets.findIndex(t => t.chatId === target.chatId && t.topicId === target.topicId);
-                                if (camp.firstRunMode === 'immediate' || !camp.firstRunMode) {
-                                    // Spread immediately with 2 mins interval
-                                    target.nextRunAt = new Date(Date.now() + (targetIndex * 2 * 60000));
-                                    console.log(`[AutoPost] Initialized IMMEDIATE spike-guard for ${target.name} in ${targetIndex * 2} mins.`);
-                                } else {
-                                    // Scatter completely randomly following schedule bounds
-                                    const delayMinutes = Math.floor(Math.random() * (sched.max - sched.min + 1)) + sched.min;
-                                    target.nextRunAt = new Date(Date.now() + delayMinutes * 60000);
-                                    console.log(`[AutoPost] Initialized RANDOM schedule for ${target.name} in ${delayMinutes} mins.`);
+                            let maxTomorrow = tomorrow.getTime();
+                            for (const o of validTargets) {
+                                if (o !== target && o.nextRunAt) {
+                                    const oTime = new Date(o.nextRunAt).getTime();
+                                    if (oTime >= tomorrow.getTime()) {
+                                        maxTomorrow = Math.max(maxTomorrow, oTime);
+                                    }
                                 }
-                                needsSave = true;
-                                this.nextRunTimes.set(targetKey, target.nextRunAt.getTime());
                             }
-                        }
-
-                        // Persistent schedule check via DB target.nextRunAt
-                        let nextRunTimestamp = target.nextRunAt.getTime();
-
-                        if (Date.now() >= nextRunTimestamp) {
-                            // Time to execute (includes missed runs!)
-                            
-                            // Spike Guard: Delay execution if multiple missed
+                            target.nextRunAt = new Date(maxTomorrow + getDelayMins(camp.delayBetweenPosts) * 60000);
+                            needsSave = true;
+                            console.log(`[AutoPost] Target ${target.name} reached daily limit (${maxPosts}). Scheduled tomorrow at ${target.nextRunAt}`);
+                        } else {
+                            // Execute Job
                             setTimeout(() => {
                                 this.executeJob(camp, target, accId, targetKey).catch(() => {});
                             }, executionDelayOffset);
-                            executionDelayOffset += 4000; // Add 4 seconds delay for the NEXT immediate job
+                            executionDelayOffset += 4000;
                             
-                            // Schedule next execution
-                            if (sched.type === 'fixed') {
-                                target.nextRunAt = getNextFixedTime(sched.times, new Date());
-                                console.log(`[AutoPost] Scheduled next FIXED post for ${target.name} at ${target.nextRunAt}`);
-                            } else if (sched.type === 'random') {
-                                const rangeMin = sched.min;
-                                const rangeMax = sched.max;
-                                const delayMinutes = Math.floor(Math.random() * (rangeMax - rangeMin + 1)) + rangeMin;
-                                target.nextRunAt = new Date(Date.now() + delayMinutes * 60 * 1000);
-                                console.log(`[AutoPost] Scheduled next RANDOM post for ${target.name} in ${delayMinutes} mins.`);
-                            }
+                            target.dailySentCount++;
                             needsSave = true;
-                            
-                            // Update memory map too for UI progress rendering
-                            this.nextRunTimes.set(targetKey, target.nextRunAt.getTime());
-                        } else if (!this.nextRunTimes.has(targetKey)) {
-                            // Keep memory map populated for UI progress if not executing yet
-                            this.nextRunTimes.set(targetKey, nextRunTimestamp);
+
+                            // Re-append to back of TODAY's belt
+                            let maxToday = Date.now();
+                            const todayEnd = new Date();
+                            todayEnd.setHours(23, 59, 59, 999);
+
+                            for (const o of validTargets) {
+                                if (o !== target && o.nextRunAt) {
+                                    const oTime = new Date(o.nextRunAt).getTime();
+                                    if (oTime <= todayEnd.getTime()) {
+                                        maxToday = Math.max(maxToday, oTime);
+                                    }
+                                }
+                            }
+                            target.nextRunAt = new Date(maxToday + getDelayMins(camp.delayBetweenPosts) * 60000);
+                            console.log(`[AutoPost] Scheduled next post for ${target.name} at ${target.nextRunAt} (Sent today: ${target.dailySentCount}/${maxPosts})`);
                         }
                     }
+
+                    this.nextRunTimes.set(targetKey, new Date(target.nextRunAt).getTime());
                 }
-                
+
                 if (needsSave) {
-                    await camp.save(); // Persist nextRunAt vào SQLite
+                    await camp.save(); 
                 }
             }
 
@@ -209,6 +281,23 @@ class AutoPostManager {
         } else {
             await this.executePost(campaign, target, accountId);
         }
+    }
+
+    async executeForTarget(campaign, target, accountId) {
+        const beforeCount = await PostLog.countDocuments({ campaignId: campaign._id });
+
+        if (campaign.type === 'forward' && campaign.forwardSource) {
+            await this.executeForward(campaign, target, accountId);
+        } else {
+            await this.executePost(campaign, target, accountId);
+        }
+
+        const logs = await PostLog.find({ campaignId: campaign._id }).lean();
+        logs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        const newLogs = logs.filter((log) => log.targetId === (target.chatId || '')).slice(0, Math.max(1, logs.length - beforeCount));
+        const latestLog = newLogs[0] || logs.find((log) => log.targetId === (target.chatId || ''));
+
+        return latestLog || { status: 'success', sentMessageIds: [] };
     }
 
     async logAction({ campaign, accountId, target, action, status, contentPreview, errorMessage, sentMessageIds = [] }) {
@@ -249,14 +338,16 @@ class AutoPostManager {
         if (!source || !source.fromChatId || !source.messageIds || source.messageIds.length === 0) return;
 
         const logBase = { campaign, accountId, target, action: 'forward', contentPreview: `Forward from ${source.fromChatId} / MsgId: ${source.messageIds.join(',')}` };
+        const sourceAccountId = source.accountId || accountId;
         
         try {
-            const res = await telegramService.withAccount(accountId, async (client) => {
+            const res = await telegramService.withAccount(sourceAccountId, async (client) => {
                 let sentIds = [];
-                const toEntity = await client.getEntity(target.chatId);
+                const toEntity = await telegramService.resolveEntity(client, target.chatId);
+                const fromEntity = await telegramService.resolveEntity(client, source.fromChatId);
                 const resArray = await client.forwardMessages(toEntity, {
                     messages: source.messageIds,
-                    fromPeer: await client.getEntity(source.fromChatId)
+                    fromPeer: fromEntity
                 });
                 // Trích xuất list msg ID gửi thành công
                 if (Array.isArray(resArray)) resArray.forEach(m => { if(m&&m.id) sentIds.push(m.id) });
@@ -265,20 +356,68 @@ class AutoPostManager {
                 return { success: true, sentIds };
             });
 
+            console.log(`[AutoPost] Forward success for ${target.name}: ${res.sentIds.join(', ') || 'no message id returned'}`);
             await this.logAction({ ...logBase, status: 'success', sentMessageIds: res.sentIds });
         } catch (err) {
             const errMsg = err.message || '';
+            console.error(`[AutoPost] Forward failed for ${target.name}:`, err);
+
+            if (errMsg.includes('CHAT_ADMIN_REQUIRED') || errMsg.includes('USER_BANNED_IN_CHANNEL') || errMsg.includes('CHAT_FORWARDS_RESTRICTED')) {
+                try {
+                    const resent = await telegramService.withAccount(sourceAccountId, async (client) => {
+                        const fromEntity = await telegramService.resolveEntity(client, source.fromChatId);
+                        const toEntity = await telegramService.resolveEntity(client, target.chatId);
+                        const messages = await client.getMessages(fromEntity, { ids: source.messageIds });
+                        const sentIds = [];
+
+                        for (const message of messages) {
+                            if (!message) continue;
+
+                            const text = message.message || '';
+                            const file = getInputFileFromMessage(message);
+                            let resMsg;
+
+                            if (file) {
+                                resMsg = await client.sendFile(toEntity, {
+                                    file,
+                                    caption: text,
+                                    replyTo: target.topicId || undefined,
+                                });
+                            } else {
+                                resMsg = await client.sendMessage(toEntity, {
+                                    message: text,
+                                    replyTo: target.topicId || undefined,
+                                    linkPreview: false,
+                                });
+                            }
+
+                            if (Array.isArray(resMsg)) resMsg.forEach(m => { if (m && m.id) sentIds.push(m.id) });
+                            else if (resMsg && resMsg.id) sentIds.push(resMsg.id);
+                        }
+
+                        return { sentIds };
+                    });
+
+                    console.log(`[AutoPost] Forward fallback resend success for ${target.name}: ${resent.sentIds.join(', ') || 'no message id returned'}`);
+                    await this.logAction({ ...logBase, status: 'success', sentMessageIds: resent.sentIds });
+                    return;
+                } catch (fallbackErr) {
+                    console.error(`[AutoPost] Forward fallback resend failed for ${target.name}:`, fallbackErr);
+                }
+            }
+
             await this.logAction({ ...logBase, status: 'fail', errorMessage: errMsg });
             
             // Auto Disable on fatal restrictions
-            if (errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') || errMsg.includes('ALLOW_PAYMENT_REQUIRED')) {
+            if (errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') || errMsg.includes('ALLOW_PAYMENT_REQUIRED') || errMsg.includes('USER_BANNED_IN_CHANNEL')) {
                 console.log(`[AutoPost] Auto-disabling target ${target.name} due to fatal restriction.`);
                 target.isDisabled = true;
-                target.lastError = errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') ? 'CHAT_SEND_WEBPAGE_FORBIDDEN' : 'ALLOW_PAYMENT_REQUIRED';
+                target.lastError = errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') ? 'CHAT_SEND_WEBPAGE_FORBIDDEN' : errMsg.includes('ALLOW_PAYMENT_REQUIRED') ? 'ALLOW_PAYMENT_REQUIRED' : 'USER_BANNED_IN_CHANNEL';
                 await campaign.save();
                 
                 notifyAdmin(`⚠️ *CẢNH BÁO AUTO POST*\nChiến dịch: [${campaign.name}]\nTarget: ${target.name}\nLỗi trầm trọng: \`${target.lastError}\`\n👉 Đã cấu hình TỰ ĐỘNG BLOCK mục tiêu này!`);
             }
+            throw err;
         }
     }
 
@@ -295,49 +434,151 @@ class AutoPostManager {
         } else {
             finalMessage = spinContent(campaign.contentTemplate);
         }
+        const messageWithActionLinks = appendActionLinks(finalMessage, campaign.actionButtons, currentParseMode);
+        const messageForDelivery = campaign.sendViaBot ? finalMessage : messageWithActionLinks;
         
-        const logBase = { campaign, accountId, target, action: 'post', contentPreview: finalMessage };
+        const logBase = { campaign, accountId, target, action: 'post', contentPreview: messageForDelivery };
+        const replyMarkup = buildReplyMarkup(campaign.actionButtons);
 
         try {
+            if (campaign.sendViaBot) {
+                const bot = getBot();
+                if (!bot) {
+                    throw new Error('BOT_NOT_INITIALIZED');
+                }
+
+                let resMsg;
+                const extra = {
+                    parse_mode: currentParseMode === 'html' ? 'HTML' : 'Markdown',
+                    reply_markup: replyMarkup ? { inline_keyboard: (campaign.actionButtons || []).filter((button) => button?.text && button?.url).slice(0, 2).map((button) => [{ text: button.text, url: button.url }]) } : undefined,
+                    disable_web_page_preview: true,
+                    message_thread_id: target.topicId || undefined,
+                };
+
+                if (campaign.imagePaths && campaign.imagePaths.length > 0) {
+                    resMsg = await bot.telegram.sendPhoto(target.chatId, campaign.imagePaths[0], {
+                        caption: messageForDelivery,
+                        ...extra,
+                    });
+                } else {
+                    resMsg = await bot.telegram.sendMessage(target.chatId, messageForDelivery, extra);
+                }
+
+                const sentIds = resMsg?.message_id ? [resMsg.message_id] : [];
+                if (sentIds.length === 0) {
+                    throw new Error('BOT_SEND_RETURNED_NO_MESSAGE_ID');
+                }
+                console.log(`[AutoPost] Bot send success for ${target.name}: ${sentIds.join(', ')}`);
+                await this.logAction({ ...logBase, status: 'success', sentMessageIds: sentIds });
+                return;
+            }
+
             const res = await telegramService.withAccount(accountId, async (client) => {
                 let sentIds = [];
-                const entity = await client.getEntity(target.chatId);
+                const entity = await telegramService.resolveEntity(client, target.chatId);
                 
                 if (campaign.imagePaths && campaign.imagePaths.length > 0) {
                     const resMsg = await client.sendFile(entity, {
                         file: campaign.imagePaths,
-                        caption: finalMessage,
+                        caption: messageWithActionLinks,
                         replyTo: target.topicId || undefined,
                         parseMode: currentParseMode,
+                        buttons: replyMarkup,
                     });
                     if (Array.isArray(resMsg)) resMsg.forEach(m => { if(m&&m.id) sentIds.push(m.id) });
                     else if (resMsg && resMsg.id) sentIds.push(resMsg.id);
                 } else {
                     const resMsg = await client.sendMessage(entity, {
-                        message: finalMessage,
+                        message: messageWithActionLinks,
                         replyTo: target.topicId || undefined,
                         linkPreview: false,
                         parseMode: currentParseMode,
+                        buttons: replyMarkup,
                     });
                     if (resMsg && resMsg.id) sentIds.push(resMsg.id);
                 }
                 return { success: true, sentIds };
             });
 
+            if (!Array.isArray(res.sentIds) || res.sentIds.length === 0) {
+                throw new Error('USER_SEND_RETURNED_NO_MESSAGE_ID');
+            }
+            console.log(`[AutoPost] User send success for ${target.name}: ${res.sentIds.join(', ')}`);
             await this.logAction({ ...logBase, status: 'success', sentMessageIds: res.sentIds });
         } catch (err) {
             const errMsg = err.message || '';
             await this.logAction({ ...logBase, status: 'fail', errorMessage: errMsg });
             
-            if (errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') || errMsg.includes('ALLOW_PAYMENT_REQUIRED')) {
+            if (errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') || errMsg.includes('ALLOW_PAYMENT_REQUIRED') || errMsg.includes('USER_BANNED_IN_CHANNEL')) {
                 console.log(`[AutoPost] Auto-disabling target ${target.name} due to fatal restriction.`);
                 target.isDisabled = true;
-                target.lastError = errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') ? 'CHAT_SEND_WEBPAGE_FORBIDDEN' : 'ALLOW_PAYMENT_REQUIRED';
+                target.lastError = errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') ? 'CHAT_SEND_WEBPAGE_FORBIDDEN' : errMsg.includes('ALLOW_PAYMENT_REQUIRED') ? 'ALLOW_PAYMENT_REQUIRED' : 'USER_BANNED_IN_CHANNEL';
                 await campaign.save();
                 
                 notifyAdmin(`⚠️ *CẢNH BÁO AUTO POST*\nChiến dịch: [${campaign.name}]\nTarget: ${target.name}\nLỗi trầm trọng: \`${target.lastError}\`\n👉 Đã cấu hình TỰ ĐỘNG BLOCK mục tiêu này!`);
             }
+            throw err;
         }
+    }
+
+    async sendNow(payload) {
+        const campaign = {
+            _id: 'send-now',
+            name: payload.name || 'Send now',
+            type: payload.type || 'text',
+            forwardSource: payload.forwardSource || null,
+            quoteText: payload.quoteText || '',
+            contentTemplate: payload.contentTemplate || '',
+            imagePaths: Array.isArray(payload.imagePaths) ? payload.imagePaths : [],
+            actionButtons: Array.isArray(payload.actionButtons) ? payload.actionButtons : [],
+            sendViaBot: !!payload.sendViaBot,
+        };
+
+        const target = {
+            chatId: payload.target?.chatId,
+            name: payload.target?.name || payload.target?.chatId || 'Target',
+            topicId: payload.target?.topicId || undefined,
+        };
+
+        const beforeLogs = await PostLog.find({ campaignId: campaign._id }).lean();
+        const beforeLogIds = new Set(beforeLogs.map((log) => log._id));
+
+        try {
+            const accountId = payload.accountId || 'bot';
+            const runner = campaign.type === 'forward' && campaign.forwardSource
+                ? this.executeForward.bind(this)
+                : this.executePost.bind(this);
+            await runner(campaign, target, accountId);
+        } catch (err) {
+            return {
+                success: false,
+                error: err.message || 'SEND_NOW_FAILED',
+            };
+        }
+
+        const logs = await PostLog.find({ campaignId: campaign._id }).lean();
+        logs.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        const latestLog = logs.find((log) => log.targetId === (target.chatId || '') && !beforeLogIds.has(log._id))
+            || logs.find((log) => log.targetId === (target.chatId || ''));
+
+        if (latestLog?.status === 'fail') {
+            return {
+                success: false,
+                error: latestLog.errorMessage || 'SEND_NOW_FAILED',
+            };
+        }
+
+        if (!latestLog || latestLog.status !== 'success' || !Array.isArray(latestLog.sentMessageIds) || latestLog.sentMessageIds.length === 0) {
+            return {
+                success: false,
+                error: 'SEND_NOW_NO_DELIVERY_CONFIRMATION',
+            };
+        }
+
+        return {
+            success: true,
+            sentMessageIds: latestLog?.sentMessageIds || [],
+        };
     }
 
     getProgress() {

@@ -10,6 +10,64 @@ class TelegramMultiClient {
         this.accounts = new Map();  // Map<accountId, info>
     }
 
+    async checkSelfBannedInChannel(client, chatId) {
+        try {
+            const channel = await this.resolveEntity(client, chatId);
+            const me = await client.getMe();
+            const info = await client.invoke(new Api.channels.GetParticipant({
+                channel,
+                participant: me,
+            }));
+            const participant = info?.participant;
+            const className = participant?.className || '';
+            if (className === 'ChannelParticipantBanned' || className === 'ChannelParticipantKicked') {
+                return { isBanned: true };
+            }
+            return { isBanned: false };
+        } catch (err) {
+            const msg = err?.message || '';
+            if (msg.includes('USER_BANNED_IN_CHANNEL')) return { isBanned: true };
+            if (msg.includes('USER_NOT_PARTICIPANT')) return { notParticipant: true };
+            return { error: msg };
+        }
+    }
+
+    /**
+     * Resolve a chatId to an entity, trying common ID format variations.
+     * Fails fast if entity can't be found — no aggressive retries.
+     */
+    async resolveEntity(client, chatId) {
+        if (!chatId) throw new Error('chatId is required');
+
+        const rawId = chatId.toString().replace(/^-100/, '');
+        const numericId = Number(rawId);
+
+        // Try 1: Direct with original chatId
+        try {
+            return await client.getEntity(chatId);
+        } catch (_) {}
+
+        if (!isNaN(numericId)) {
+            // Try 2: With -100 prefix (string)
+            try {
+                return await client.getEntity(`-100${rawId}`);
+            } catch (_) {}
+
+            // Try 3: With -100 prefix (BigInt)
+            try {
+                return await client.getEntity(BigInt(`-100${rawId}`));
+            } catch (_) {}
+
+            // Try 4: PeerChannel constructor
+            try {
+                const peer = new Api.PeerChannel({ channelId: BigInt(rawId) });
+                return await client.getEntity(peer);
+            } catch (_) {}
+        }
+
+        throw new Error(`Could not resolve entity for chatId: ${chatId}. Make sure this account has joined the group/channel.`);
+    }
+
     async init(store) {
         this.store = store; // Keep store ref if needed elsewhere, but mostly obsolete
         try {
@@ -96,6 +154,12 @@ class TelegramMultiClient {
             this.accounts.set(account.id, accInfo);
             console.log(`[Telegram] Connected: ${me.firstName} (@${me.username})`);
             this._saveAccounts();
+
+            // Pre-populate entity cache in background (non-blocking)
+            client.getDialogs({ limit: 500 }).then(() => {
+                console.log(`[Telegram] Entity cache populated for ${me.firstName}`);
+            }).catch(() => {});
+
             return accInfo;
         } catch (err) {
             console.error(`[Telegram] Failed to connect ${account.id}:`, err.message);
@@ -386,7 +450,7 @@ class TelegramMultiClient {
     async getForumTopics(accountId, chatId) {
         return this.withAccount(accountId, async (client) => {
             try {
-                const entity = await client.getEntity(chatId);
+                const entity = await this.resolveEntity(client, chatId);
                 const result = await client.invoke(new Api.channels.GetForumTopics({
                     channel: entity,
                     limit: 100,
@@ -410,7 +474,7 @@ class TelegramMultiClient {
     // ─── MESSAGES: Browse recent messages ──────────────
     async getMessages(accountId, chatId, limit = 30) {
         return this.withAccount(accountId, async (client) => {
-            const entity = await client.getEntity(chatId);
+            const entity = await this.resolveEntity(client, chatId);
             const messages = await client.getMessages(entity, { limit });
             return messages.map(m => ({
                 id: m.id,
@@ -425,7 +489,7 @@ class TelegramMultiClient {
 
     async getMessageMedia(accountId, chatId, messageId) {
         return this.withAccount(accountId, async (client) => {
-            const entity = await client.getEntity(chatId);
+            const entity = await this.resolveEntity(client, chatId);
             const messages = await client.getMessages(entity, { ids: [messageId] });
             if (!messages || messages.length === 0 || !messages[0].media) {
                 return { success: false, error: 'No media found' };
@@ -451,7 +515,7 @@ class TelegramMultiClient {
     async scanGroupSecurity(accountId, chatId) {
         return this.withAccount(accountId, async (client) => {
             try {
-                const entity = await client.getEntity(chatId);
+                const entity = await this.resolveEntity(client, chatId);
                 const result = {
                     adminBots: [],
                     messagesScanned: 0,
@@ -523,11 +587,11 @@ class TelegramMultiClient {
     // ─── FORWARD / SHARE ───────────────────────────────  
     async forwardMessages(accountId, fromChatId, messageIds, toChatIds) {
         return this.withAccount(accountId, async (client) => {
-            const fromEntity = await client.getEntity(fromChatId);
+            const fromEntity = await this.resolveEntity(client, fromChatId);
             const results = [];
             for (const toChatId of toChatIds) {
                 try {
-                    const toEntity = await client.getEntity(toChatId);
+                    const toEntity = await this.resolveEntity(client, toChatId);
                     await client.forwardMessages(toEntity, {
                         messages: messageIds,
                         fromPeer: fromEntity,
@@ -554,7 +618,7 @@ class TelegramMultiClient {
                 if (campaignPayload.type === 'forward') {
                     const source = campaignPayload.forwardSource;
                     if (source && source.fromChatId && source.messageIds && source.messageIds.length > 0) {
-                        const fromEntity = await client.getEntity(source.fromChatId);
+                        const fromEntity = await this.resolveEntity(client, source.fromChatId);
                         const messages = await client.getMessages(fromEntity, { ids: source.messageIds });
                         for (const msg of messages) {
                             if (!msg) continue;
@@ -594,6 +658,74 @@ class TelegramMultiClient {
 
                     const rights = target.defaultBannedRights || {};
 
+                    // Kiểm tra tài khoản cụ thể (account đang chạy) có bị Mute/Ban/Kick không
+                    let isBanned = false;
+                    let notParticipant = false;
+                    let resolveError = '';
+                    try {
+                        const entity = await this.resolveEntity(client, target.chatId);
+                        if (entity && entity.className === 'Channel') {
+                            if (entity.broadcast && !entity.megagroup) {
+                                // Đây là kênh Channel (Broadcast 1 chiều)
+                                if (!entity.creator && (!entity.adminRights || !entity.adminRights.postMessages)) {
+                                    isBanned = true;
+                                    resolveError = 'Tài khoản không phải Admin nên không thể gửi bài vào Kênh (Broadcast Channel).';
+                                }
+                            } else {
+                                // Là SuperGroup
+                                try {
+                                    const p = await client.invoke(new Api.channels.GetParticipant({ channel: entity, participant: 'me' }));
+                                    if (p && p.participant && p.participant.className === 'ChannelParticipantBanned') {
+                                        if (p.participant.bannedRights) {
+                                            // Nếu cấm sendMessages hoặc cấm readMessages thì coi như ban
+                                            if (p.participant.bannedRights.sendMessages || p.participant.bannedRights.viewMessages) {
+                                                isBanned = true;
+                                            }
+                                        }
+                                    } else if (p && p.participant && p.participant.className === 'ChannelParticipantLeft') {
+                                        notParticipant = true;
+                                    }
+                                } catch (pErr) {
+                                    if (pErr.message.includes('USER_NOT_PARTICIPANT')) {
+                                        notParticipant = true;
+                                    } else if (pErr.message.includes('USER_BANNED_IN_CHANNEL')) {
+                                        isBanned = true;
+                                    } else {
+                                        throw pErr;
+                                    }
+                                }
+                            }
+                        } else if (entity && entity.className === 'Chat') {
+                            // Basic Group - thường nếu bị kích/ban sẽ văng lỗi ngay ở resolveEntity
+                            if (entity.left || entity.kicked) {
+                                notParticipant = true;
+                            }
+                        }
+                    } catch (err) {
+                        const msg = err.message || '';
+                        if (msg.includes('CHANNEL_PRIVATE') || msg.includes('USER_BANNED_IN_CHANNEL')) {
+                            isBanned = true;
+                        } else if (msg.includes('USER_NOT_PARTICIPANT') || msg.includes('Could not resolve entity')) {
+                            notParticipant = true;
+                        } else {
+                            notParticipant = true;
+                            resolveError = msg;
+                        }
+                    }
+
+                    if (isBanned) {
+                        report.status = 'ERROR';
+                        report.reasons.push('Lỗi: Tài khoản chạy chiến dịch này đã bị Khóa/Cấm chat trong nhóm này!');
+                        result.targets.push(report);
+                        continue;
+                    }
+                    if (notParticipant) {
+                        report.status = 'ERROR';
+                        report.reasons.push(`Lỗi truy cập: Tài khoản chưa tham gia nhóm này hoặc đã bị kick ra ngoài${resolveError ? ` (${resolveError})` : ''}.`);
+                        result.targets.push(report);
+                        continue;
+                    }
+
                     // Cấm toàn tập
                     if (rights.sendMessages) {
                         report.status = 'ERROR';
@@ -622,7 +754,7 @@ class TelegramMultiClient {
                         // Kiểm tra Forward chống Anti-Spam Bot
                         if (campaignPayload.type === 'forward') {
                             try {
-                                const entity = await client.getEntity(target.chatId);
+                                const entity = await this.resolveEntity(client, target.chatId);
                                 const msgs = await client.getMessages(entity, { limit: 60 });
                                 let fwdCount = 0;
                                 for (let m of msgs) {
@@ -655,9 +787,26 @@ class TelegramMultiClient {
     }
 
     // ─── GROUP MANAGEMENT ──────────────────────────────
+    async leaveGroup(accountId, chatId) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const entity = await this.resolveEntity(client, chatId);
+                if (entity.className === 'Channel') {
+                    await client.invoke(new Api.channels.LeaveChannel({ channel: entity }));
+                } else if (entity.className === 'Chat') {
+                    await client.invoke(new Api.messages.DeleteChatUser({ chatId: entity.id, userId: 'me' }));
+                } else {
+                    return { success: false, error: 'Không phải là nhóm hoặc kênh (Not a group/channel)' };
+                }
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
     async addMember(accountId, groupId, userId) {
         return this.withAccount(accountId, async (client) => {
-            const channel = await client.getEntity(groupId);
+            const channel = await this.resolveEntity(client, groupId);
             const user = await client.getEntity(userId);
             await client.invoke(new Api.channels.InviteToChannel({ channel, users: [user] }));
             return { success: true };
@@ -666,7 +815,7 @@ class TelegramMultiClient {
 
     async removeMember(accountId, groupId, userId) {
         return this.withAccount(accountId, async (client) => {
-            const channel = await client.getEntity(groupId);
+            const channel = await this.resolveEntity(client, groupId);
             const user = await client.getEntity(userId);
             await client.invoke(new Api.channels.EditBanned({
                 channel,
@@ -681,7 +830,7 @@ class TelegramMultiClient {
     async getPhoto(accountId, peerId) {
         return this.withAccount(accountId, async (client) => {
             try {
-                const peer = peerId ? await client.getEntity(peerId) : 'me';
+                const peer = peerId ? await this.resolveEntity(client, peerId) : 'me';
                 const buffer = await client.downloadProfilePhoto(peer, { isBig: false });
                 if (buffer && buffer.length > 0) {
                     return { success: true, photoBase64: buffer.toString('base64') };

@@ -1,10 +1,16 @@
 const path = require("path");
 const sqlite3 = require("sqlite3").verbose();
 
-const DB_PATH =
-  process.env.SQLITE_DB_PATH ||
-  path.join(__dirname, "..", "data", "telegram-auto-post.sqlite3");
-
+const DB_PATH = (() => {
+  if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
+  try {
+    const { app } = require("electron");
+    if (app && app.isPackaged) {
+      return path.join(app.getPath("userData"), "telegram-auto-post.sqlite3");
+    }
+  } catch (e) {}
+  return path.join(__dirname, "..", "data", "telegram-auto-post.sqlite3");
+})();
 let dbInstance = null;
 
 function getDb() {

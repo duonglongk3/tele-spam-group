@@ -27,6 +27,11 @@ interface TargetItem {
   customSchedule?: string
 }
 
+interface ActionButtonItem {
+  text: string
+  url: string
+}
+
 function AutoPostContent() {
   const searchParams = useSearchParams()
   const [campaigns, setCampaigns] = useState<any[]>([])
@@ -39,6 +44,7 @@ function AutoPostContent() {
   const [dialogs, setDialogs] = useState<any[]>([])
   const [searchTargetQuery, setSearchTargetQuery] = useState('')
   const [isLoadingGroups, setIsLoadingGroups] = useState(false)
+  const [selectedAccountFilter, setSelectedAccountFilter] = useState('all')
   
   // Topics state per group
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null)
@@ -51,6 +57,7 @@ function AutoPostContent() {
   // Progress Tracking state
   const [campaignProgress, setCampaignProgress] = useState<any[]>([])
   const [viewingProgressCampaign, setViewingProgressCampaign] = useState<any>(null)
+  const [sendingNow, setSendingNow] = useState(false)
 
   useEffect(() => { loadData() }, [])
 
@@ -94,7 +101,13 @@ function AutoPostContent() {
         accounts: [accId],
         targets: [],
         contentTemplate: '',
-        schedule: '60-240',
+        sendViaBot: false,
+        actionButtons: [
+          { text: 'Redirect đến web', url: '' },
+          { text: 'Contact admin', url: '' },
+        ],
+        delayBetweenPosts: "10-20",
+        maxPostsPerDay: 3,
         firstRunMode: 'immediate'
       })
       setIsEditing(true)
@@ -114,18 +127,28 @@ function AutoPostContent() {
   }
 
   const handleCreateNew = () => {
+    const defaultAccounts = selectedAccountFilter !== 'all' ? [selectedAccountFilter] : []
     setEditingCampaign({
       name: 'Chiến dịch mới',
       type: 'text',
-      accounts: [],
+      accounts: defaultAccounts,
       targets: [],
       contentTemplate: '',
-      schedule: '60-240',
+      sendViaBot: false,
+      actionButtons: [
+        { text: 'Redirect đến web', url: '' },
+        { text: 'Contact admin', url: '' },
+      ],
+      delayBetweenPosts: "10-20",
+      maxPostsPerDay: 3,
       firstRunMode: 'immediate'
     })
     setIsEditing(true)
     setDialogs([])
     setTopicsMap({})
+    if (defaultAccounts.length > 0) {
+      fetchDialogsForAccounts(defaultAccounts)
+    }
   }
 
   const handleEdit = (c: any) => {
@@ -238,6 +261,57 @@ function AutoPostContent() {
       loadData()
     } else {
       toast.error("Lỗi: " + res?.error)
+    }
+  }
+
+  const handleActionButtonChange = (index: number, field: keyof ActionButtonItem, value: string) => {
+    setEditingCampaign((prev: any) => ({
+      ...prev,
+      actionButtons: (prev.actionButtons || []).map((button: ActionButtonItem, buttonIndex: number) =>
+        buttonIndex === index ? { ...button, [field]: value } : button
+      )
+    }))
+  }
+
+  const handleSendNow = async () => {
+    if (!editingCampaign?.targets?.length) {
+      toast.warning('Vui lòng chọn 1 target để gửi ngay');
+      return;
+    }
+
+    if (editingCampaign.sendViaBot !== true && !editingCampaign.accounts?.[0]) {
+      toast.warning('Vui lòng chọn tài khoản hoặc bật gửi bằng bot');
+      return;
+    }
+
+    try {
+      setSendingNow(true)
+      const res = await telegramApi.sendNow({
+        name: editingCampaign.name,
+        type: editingCampaign.type,
+        forwardSource: editingCampaign.forwardSource,
+        quoteText: editingCampaign.quoteText,
+        contentTemplate: editingCampaign.contentTemplate,
+        imagePaths: editingCampaign.imagePaths || [],
+        actionButtons: editingCampaign.actionButtons || [],
+        sendViaBot: !!editingCampaign.sendViaBot,
+        accountId: editingCampaign.accounts?.[0],
+        target: editingCampaign.targets[0],
+      })
+
+      if (res?.success) {
+        if (Array.isArray(res.sentMessageIds) && res.sentMessageIds.length > 0) {
+          toast.success(`Đã gửi ngay thành công (${res.sentMessageIds.length} tin)`)
+        } else {
+          toast.success('Đã gửi ngay thành công')
+        }
+      } else {
+        toast.error('Gửi thất bại: ' + res?.error)
+      }
+    } catch (e: any) {
+      toast.error('Gửi thất bại: ' + e.message)
+    } finally {
+      setSendingNow(false)
     }
   }
 
@@ -385,11 +459,19 @@ function AutoPostContent() {
               </select>
             </div>
 
-            <div>
-              <label className="block text-sm font-semibold mb-1.5">Lịch gửi toàn cục mặc định (phút, VD: 60-240)</label>
-              <input type="text" value={editingCampaign.schedule}
-                onChange={e => setEditingCampaign({...editingCampaign, schedule: e.target.value})}
-                className="w-full p-2.5 border rounded-lg" />
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold mb-1.5">Khoảng cách gửi giữa mỗi Group (Phút)</label>
+                <input type="text" placeholder="VD: 5 hoặc 10-20" value={editingCampaign.delayBetweenPosts || "10-20"}
+                  onChange={e => setEditingCampaign({...editingCampaign, delayBetweenPosts: e.target.value})}
+                  className="w-full p-2.5 border rounded-lg bg-white" />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold mb-1.5">Tối đa gửi 1 Group / 1 Ngày</label>
+                <input type="number" min="1" value={editingCampaign.maxPostsPerDay || 3}
+                  onChange={e => setEditingCampaign({...editingCampaign, maxPostsPerDay: parseInt(e.target.value) || 3})}
+                  className="w-full p-2.5 border rounded-lg bg-white" />
+              </div>
             </div>
 
             <div>
@@ -479,38 +561,6 @@ function AutoPostContent() {
                     {d.isChannel && <span className="text-[10px] bg-purple-100 text-purple-600 px-1.5 py-0.5 rounded font-semibold">CH</span>}
                   </div>
 
-                  {/* Target Schedule Customization */}
-                  {isTargetSelected(d.id) && !d.isForum && (
-                    <div className="pl-8 pr-3 py-2 bg-slate-50 border-b border-gray-100/50 flex flex-wrap gap-2 items-center">
-                      <select 
-                        title="Tùy chỉnh lịch gửi"
-                        value={editingCampaign.targets.find((t: any) => t.chatId === d.id)?.scheduleType || 'global'}
-                        onChange={(e) => handleTargetScheduleChange(d.id, 'scheduleType', e.target.value)}
-                        className="text-xs p-1.5 border rounded bg-white shadow-sm font-medium text-gray-700"
-                      >
-                        <option value="global">Lịch dùng chung</option>
-                        <option value="random">Lịch ngẫu nhiên (phút)</option>
-                        <option value="fixed">Giờ cố định (hàng ngày)</option>
-                      </select>
-                      
-                      {editingCampaign.targets.find((t: any) => t.chatId === d.id)?.scheduleType === 'random' && (
-                        <input type="text" placeholder="VD: Min-Max (60-120)"
-                          className="text-xs p-1.5 border rounded flex-1 min-w-[100px]"
-                          value={editingCampaign.targets.find((t: any) => t.chatId === d.id)?.customSchedule || ''}
-                          onChange={(e) => handleTargetScheduleChange(d.id, 'customSchedule', e.target.value)}
-                        />
-                      )}
-                      
-                      {editingCampaign.targets.find((t: any) => t.chatId === d.id)?.scheduleType === 'fixed' && (
-                        <input type="text" placeholder="VD: 10:00, 15:30"
-                          className="text-xs p-1.5 border rounded flex-1 min-w-[100px]"
-                          value={editingCampaign.targets.find((t: any) => t.chatId === d.id)?.customSchedule || ''}
-                          onChange={(e) => handleTargetScheduleChange(d.id, 'customSchedule', e.target.value)}
-                        />
-                      )}
-                    </div>
-                  )}
-
                   {/* Forum Topics (expanded) */}
                   {d.isForum && expandedGroup === d.id && (
                     <div className="bg-gray-50 border-b">
@@ -533,31 +583,6 @@ function AutoPostContent() {
                             <span className="text-gray-700">{topic.title}</span>
                             <span className="text-[10px] text-gray-400 ml-auto">#{topic.id}</span>
                           </label>
-                          {/* Topic Schedule Customization */}
-                          {isTargetSelected(d.id, topic.id) && (
-                            <div className="pl-14 pr-8 py-2 bg-slate-100/50 flex flex-wrap gap-2 items-center">
-                              <select 
-                                title="Tùy chỉnh lịch gửi"
-                                value={editingCampaign.targets.find((t: any) => t.chatId === d.id && t.topicId === topic.id)?.scheduleType || 'global'}
-                                onChange={(e) => handleTargetScheduleChange(`${d.id}:${topic.id}`, 'scheduleType', e.target.value)}
-                                className="text-xs p-1.5 border rounded bg-white font-medium text-gray-700"
-                              >
-                                <option value="global">Lịch dùng chung</option>
-                                <option value="random">Lịch ngẫu nhiên</option>
-                                <option value="fixed">Giờ cố định</option>
-                              </select>
-                              {editingCampaign.targets.find((t: any) => t.chatId === d.id && t.topicId === topic.id)?.scheduleType === 'random' && (
-                                <input type="text" placeholder="Min-Max phút" className="text-xs p-1.5 border rounded w-24"
-                                  value={editingCampaign.targets.find((t: any) => t.chatId === d.id && t.topicId === topic.id)?.customSchedule || ''}
-                                  onChange={(e) => handleTargetScheduleChange(`${d.id}:${topic.id}`, 'customSchedule', e.target.value)} />
-                              )}
-                              {editingCampaign.targets.find((t: any) => t.chatId === d.id && t.topicId === topic.id)?.scheduleType === 'fixed' && (
-                                <input type="text" placeholder="VD: 10:00" className="text-xs p-1.5 border rounded w-24"
-                                  value={editingCampaign.targets.find((t: any) => t.chatId === d.id && t.topicId === topic.id)?.customSchedule || ''}
-                                  onChange={(e) => handleTargetScheduleChange(`${d.id}:${topic.id}`, 'customSchedule', e.target.value)} />
-                              )}
-                            </div>
-                          )}
                         </div>
                       ))}
                       {!loadingTopics && (topicsMap[d.id] || []).length === 0 && (
@@ -645,6 +670,37 @@ function AutoPostContent() {
           </div>
         )}
 
+        <div className="space-y-3 pt-2">
+          <label className="flex items-center gap-3 text-sm font-medium">
+            <input
+              type="checkbox"
+              checked={!!editingCampaign.sendViaBot}
+              onChange={e => setEditingCampaign({ ...editingCampaign, sendViaBot: e.target.checked })}
+            />
+            Gửi bằng Telegram Bot để hiện inline buttons thật
+          </label>
+          <div>
+            <label className="block text-sm font-semibold mb-1">Nút hành động dưới tin nhắn</label>
+            <p className="text-xs text-gray-500">Điền link cho 2 nút: `Redirect đến web` và `Contact admin`.</p>
+          </div>
+          {(editingCampaign.actionButtons || []).map((button: ActionButtonItem, index: number) => (
+            <div key={index} className="grid gap-3 md:grid-cols-2">
+              <input
+                className="w-full p-3 border rounded-xl bg-gray-50 text-sm"
+                value={button.text}
+                onChange={e => handleActionButtonChange(index, 'text', e.target.value)}
+                placeholder={index === 0 ? 'Redirect đến web' : 'Contact admin'}
+              />
+              <input
+                className="w-full p-3 border rounded-xl bg-gray-50 text-sm"
+                value={button.url}
+                onChange={e => handleActionButtonChange(index, 'url', e.target.value)}
+                placeholder={index === 0 ? 'https://your-site.com' : 'https://t.me/your_admin_username'}
+              />
+            </div>
+          ))}
+        </div>
+
         {/* Bottom Bar */}
         <div className="fixed bottom-0 left-0 lg:left-64 right-0 p-4 border-t bg-white flex justify-end gap-3 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)] z-40">
           <div className="flex flex-col sm:flex-row items-center gap-2 mr-auto ml-2 sm:ml-4">
@@ -659,6 +715,9 @@ function AutoPostContent() {
           </div>
 
           <button onClick={() => setIsEditing(false)} className="px-6 py-2 rounded-lg font-medium bg-gray-100">Hủy</button>
+          <button onClick={handleSendNow} disabled={sendingNow} className="px-6 py-2 rounded-lg font-medium bg-emerald-600 text-white flex items-center gap-2 disabled:opacity-50">
+            {sendingNow ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Gửi ngay
+          </button>
           <button onClick={handleSave} className="px-6 py-2 rounded-lg font-medium bg-[#24A1DE] text-white flex items-center gap-2">
             <Save className="w-4 h-4" /> Lưu Chiến Dịch
           </button>
@@ -742,21 +801,39 @@ function AutoPostContent() {
   }
 
   // ─── CAMPAIGN LIST VIEW ─────────────────────────────
+  const filteredCampaigns = selectedAccountFilter === 'all' 
+    ? campaigns 
+    : campaigns.filter(c => c.accounts?.includes(selectedAccountFilter));
+
   return (
-    <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-8 fade-in">
-      <div className="flex justify-between items-center">
+    <div className="p-6 pb-28 md:p-8 md:pb-32 max-w-7xl mx-auto space-y-8 fade-in">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-gray-900">Chiến dịch Auto Post</h1>
           <p className="text-gray-500 mt-2">Tạo nhiều chiến dịch khác nhau, mỗi chiến dịch gắn tài khoản và targets riêng</p>
         </div>
-        <button onClick={handleCreateNew}
-          className="bg-[#24A1DE] text-white px-5 py-2.5 rounded-xl font-medium flex items-center gap-2 hover:bg-[#1E88BE] shadow-sm">
-          <Plus className="w-5 h-5" /> Tạo chiến dịch
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <select 
+            value={selectedAccountFilter} 
+            onChange={e => setSelectedAccountFilter(e.target.value)}
+            className="p-2.5 border rounded-xl bg-white shadow-sm font-medium focus:ring-2 focus:ring-[#24A1DE] outline-none text-sm text-gray-700"
+          >
+            <option value="all">Tất cả tài khoản</option>
+            {accounts.map(acc => (
+              <option key={acc.id} value={acc.id}>
+                {acc.firstName || 'User'} {acc.username ? `(@${acc.username})` : `(${acc.phone})`}
+              </option>
+            ))}
+          </select>
+          <button onClick={handleCreateNew}
+            className="bg-[#24A1DE] text-white px-5 py-2.5 rounded-xl font-medium flex items-center gap-2 hover:bg-[#1E88BE] shadow-sm whitespace-nowrap">
+            <Plus className="w-5 h-5" /> Tạo chiến dịch
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {campaigns.map(c => (
+        {filteredCampaigns.map(c => (
           <Card key={c._id} className="p-5 flex flex-col gap-4 border-l-4 border-l-blue-500">
             <div className="flex justify-between items-start">
               <div>
@@ -816,10 +893,10 @@ function AutoPostContent() {
           </Card>
         ))}
 
-        {campaigns.length === 0 && (
+        {filteredCampaigns.length === 0 && (
           <div className="col-span-full py-16 text-center text-gray-500 border border-dashed rounded-xl bg-gray-50">
             <Send className="w-12 h-12 mx-auto mb-3 text-gray-300" />
-            <p>Chưa có chiến dịch nào.</p>
+            <p>{campaigns.length === 0 ? 'Chưa có chiến dịch nào.' : 'Chưa có chiến dịch nào cho tài khoản này.'}</p>
           </div>
         )}
       </div>

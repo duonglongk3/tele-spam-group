@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { 
   Users2, MessageSquare, Megaphone, Edit, Share2, ArrowLeft, ArrowRight, ShieldCheck, Crown, 
   Lock, ImageOff, MessageCircleOff, Link2Off, FileX, BotOff, ShieldAlert, CheckCircle2, AlertTriangle, AlertCircle,
-  Eye, X, Image as ImageIcon, Send, Search
+  Eye, X, Image as ImageIcon, Send, Search, LogOut
 } from "lucide-react"
 import { telegramApi } from "@/lib/telegram"
 import { toast } from "sonner"
@@ -105,6 +105,23 @@ export default function GroupsPage() {
       setScanResult({ error: e.message });
     } finally {
       setLoadingScan(false);
+    }
+  }
+
+  const handleLeaveGroup = async (dialog: any) => {
+    if (!confirm(`Bạn có chắc chắn muốn thoát khỏi ${dialog.isGroup ? 'nhóm' : 'kênh'} "${dialog.title}" không?`)) return;
+    
+    toast.loading(`Đang thoát ${dialog.title}...`, { id: 'leave' });
+    try {
+      const res = await telegramApi.leaveGroup(selectedAccId, dialog.id);
+      if (res?.success) {
+        toast.success(`Đã thoát ${dialog.title}`, { id: 'leave' });
+        loadDialogs(selectedAccId);
+      } else {
+        toast.error(`Lỗi: ${res?.error || 'Không thể thoát'}`, { id: 'leave' });
+      }
+    } catch (e: any) {
+      toast.error(`Lỗi: ${e.message}`, { id: 'leave' });
     }
   }
 
@@ -276,29 +293,37 @@ export default function GroupsPage() {
                       </div>
                     </div>
 
-                    <div className="border-t bg-gray-50/80 p-3 grid grid-cols-3 gap-2 mt-auto">
+                    <div className="border-t bg-gray-50/80 p-3 grid grid-cols-4 gap-1.5 mt-auto">
                       <button 
                         onClick={() => handleViewMessages(dialog)}
-                        className="flex items-center justify-center gap-1.5 py-2 px-1 rounded-lg text-[10px] sm:text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors"
+                        className="flex items-center justify-center gap-1.5 py-2 px-0.5 rounded-md text-[10px] sm:text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 transition-colors"
                         title="Xem bài đăng"
                       >
-                        <Eye className="w-3.5 h-3.5" /> <span className="hidden lg:inline">Bài đăng</span>
+                        <Eye className="w-3.5 h-3.5" /> <span className="hidden lg:inline">Xem</span>
                       </button>
                       
                       <Link 
                         href={`/autopost?target=${dialog.id}&acc=${selectedAccId}`}
-                        className="flex items-center justify-center gap-1.5 py-2 px-1 rounded-lg text-[10px] sm:text-xs font-medium text-gray-700 bg-gray-200/80 hover:bg-gray-300 transition-colors text-center"
+                        className="flex items-center justify-center gap-1.5 py-2 px-0.5 rounded-md text-[10px] sm:text-xs font-medium text-gray-700 bg-gray-200/80 hover:bg-gray-300 transition-colors text-center"
                         title="Đăng bài mới"
                       >
-                        <Edit className="w-3.5 h-3.5" /> <span className="hidden lg:inline">Đăng bài</span>
+                        <Edit className="w-3.5 h-3.5" /> <span className="hidden lg:inline">Đăng</span>
                       </Link>
 
                       <button 
                         onClick={() => handleScanSecurity(dialog)}
-                        className="flex items-center justify-center gap-1.5 py-2 px-1 rounded-lg text-[10px] sm:text-xs font-medium text-amber-700 bg-amber-100/80 hover:bg-amber-200 transition-colors"
+                        className="flex items-center justify-center gap-1.5 py-2 px-0.5 rounded-md text-[10px] sm:text-xs font-medium text-amber-700 bg-amber-100/80 hover:bg-amber-200 transition-colors"
                         title="Quét rủi ro"
                       >
                         <ShieldAlert className="w-3.5 h-3.5" /> <span className="hidden lg:inline">Quét</span>
+                      </button>
+
+                      <button 
+                        onClick={() => handleLeaveGroup(dialog)}
+                        className="flex items-center justify-center gap-1.5 py-2 px-0.5 rounded-md text-[10px] sm:text-xs font-medium text-red-700 bg-red-100/80 hover:bg-red-200 transition-colors"
+                        title="Thoát nhóm"
+                      >
+                        <LogOut className="w-3.5 h-3.5" /> <span className="hidden lg:inline">Thoát</span>
                       </button>
                     </div>
                   </Card>

@@ -1,8 +1,9 @@
 'use client'
 
 import { useState, useEffect } from "react"
-import { ClipboardList, CheckCircle, XCircle, Filter, ChevronLeft, ChevronRight } from "lucide-react"
+import { ClipboardList, CheckCircle, XCircle, Filter, ChevronLeft, ChevronRight, Trash2 } from "lucide-react"
 import { telegramApi } from "@/lib/telegram"
+import { toast } from "sonner"
 
 function Card({ children, className = '' }: { children: React.ReactNode, className?: string }) {
   return <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${className}`}>{children}</div>;
@@ -48,6 +49,19 @@ export default function LogsPage() {
     try { return new Date(d).toLocaleString('vi-VN') } catch { return d }
   }
 
+  const handleClearAll = async () => {
+    if (!confirm("Xác nhận xóa toàn bộ Lịch sử hành động? Thao tác này không thể hoàn tác.")) return;
+    const res = await telegramApi.deleteAllLogs()
+    if (res?.success) {
+      toast.success("Đã xóa toàn bộ lịch sử!")
+      setLogs([])
+      setTotal(0)
+      setPage(0)
+    } else {
+      toast.error("Lỗi xóa lịch sử: " + res?.error)
+    }
+  }
+
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6 fade-in">
       <div>
@@ -81,6 +95,13 @@ export default function LogsPage() {
           <option value="fail">Thất bại</option>
         </select>
         <span className="ml-auto text-sm text-gray-400">Tổng: {total} bản ghi</span>
+        <button 
+          onClick={handleClearAll}
+          disabled={logs.length === 0}
+          className="ml-2 px-3 py-1.5 flex items-center gap-1 bg-red-50 text-red-600 rounded-lg text-sm font-medium hover:bg-red-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          <Trash2 className="w-4 h-4"/> Xóa Tất Cả
+        </button>
       </Card>
 
       {/* Table */}

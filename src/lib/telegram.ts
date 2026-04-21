@@ -34,12 +34,16 @@ export const telegramApi = {
     ipc('telegram:getDialogs', { accountId }),
   getForumTopics: (accountId: string, chatId: string) =>
     ipc('telegram:getForumTopics', { accountId, chatId }),
+  leaveGroup: (accountId: string, chatId: string) =>
+    ipc('telegram:leaveGroup', { accountId, chatId }),
 
   // ─── Messages / Forward / Diagnostics ─────────────────────
   getMessages: (accountId: string, chatId: string, limit?: number) =>
     ipc('telegram:getMessages', { accountId, chatId, limit }),
   getMessageMedia: (accountId: string, chatId: string, messageId: number) =>
     ipc('telegram:getMessageMedia', { accountId, chatId, messageId }),
+  sendNow: (payload: any) =>
+    ipc('telegram:sendNow', payload),
   forwardMessages: (accountId: string, fromChatId: string, messageIds: number[], toChatIds: string[]) =>
     ipc('telegram:forwardMessages', { accountId, fromChatId, messageIds, toChatIds }),
   scanGroupSecurity: (accountId: string, chatId: string) =>
@@ -57,6 +61,7 @@ export const telegramApi = {
   getLogs: (params?: { campaignId?: string, limit?: number, skip?: number }) =>
     ipc('log:findAll', params || {}),
   getLogStats: () => ipc('log:getStats'),
+  deleteAllLogs: () => ipc('log:deleteAll'),
 
   // ─── Workspace ────────────────────────────────────────
   exportWorkspace: (workspaceId?: string) => 

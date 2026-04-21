@@ -13,6 +13,28 @@ let server = null;
 let adminChatId = undefined;
 const wizardSessions = new Map();
 
+function normalizeWebhookBaseUrl(rawUrl = '') {
+  const trimmed = (rawUrl || '').trim().replace(/\/$/, '');
+  if (!trimmed) return '';
+
+  try {
+    const parsed = new URL(trimmed);
+    if (!parsed.hostname.endsWith('.devtunnels.ms')) {
+      return trimmed;
+    }
+
+    const portFromHost = parsed.hostname.match(/-(\d+)\.asse\.devtunnels\.ms$/)?.[1];
+    if (portFromHost === '3000') {
+      parsed.hostname = parsed.hostname.replace('-3000.', '-3001.');
+      return parsed.toString().replace(/\/$/, '');
+    }
+
+    return trimmed;
+  } catch (_) {
+    return trimmed;
+  }
+}
+
 function renderWizard(ctx) {
    const payload = wizardSessions.get(ctx.chat.id.toString());
    if (!payload) return;
@@ -604,14 +626,22 @@ ${c.contentTemplate ? c.contentTemplate.substring(0, 150) + '...' : '(Do Cấu h
   expressApp.use(express.json());
   
   // Use telegraf webhook middleware
-  const baseUrl = setting.telegramWebhookUrl ? setting.telegramWebhookUrl.replace(/\/$/, '') : '';
+  const baseUrl = normalizeWebhookBaseUrl(setting.telegramWebhookUrl);
   const webhookUrl = baseUrl + '/webhook';
   
   try {
-    expressApp.use(bot.webhookCallback('/webhook'));
-    
-    // Test endpoint to verify Express is alive
     expressApp.get('/', (req, res) => res.send('Bot Webhook Server is running'));
+    expressApp.get('/webhook', (req, res) => res.status(200).send('Telegram webhook endpoint ready'));
+    expressApp.post('/webhook', async (req, res) => {
+      try {
+        await bot.handleUpdate(req.body, res);
+      } catch (err) {
+        console.error('[Telegram Bot] Webhook handle error:', err);
+        if (!res.headersSent) {
+          res.status(500).send('Webhook error');
+        }
+      }
+    });
 
     server = expressApp.listen(3001, async () => {
       console.log('[Telegram Bot] Express server listening on 3001 for webhooks');
@@ -656,4 +686,8 @@ function notifyAdmin(message, parseMode = 'Markdown') {
   }
 }
 
-module.exports = { initBot, notifyAdmin };
+function getBot() {
+  return bot;
+}
+
+module.exports = { initBot, notifyAdmin, getBot };

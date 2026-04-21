@@ -246,6 +246,15 @@ ipcMain.handle("telegram:getDialogs", async (_, { accountId }) => {
   }
 });
 
+ipcMain.handle("telegram:leaveGroup", async (_, { accountId, chatId }) => {
+  const telegramService = require("./telegramService");
+  try {
+    return await telegramService.leaveGroup(accountId, chatId);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle("telegram:getForumTopics", async (_, { accountId, chatId }) => {
   const telegramService = require("./telegramService");
   try {
@@ -316,6 +325,15 @@ ipcMain.handle(
     }
   },
 );
+
+ipcMain.handle("telegram:sendNow", async (_, payload) => {
+  const autoPostService = require("./autoPostService");
+  try {
+    return await autoPostService.sendNow(payload);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
 
 ipcMain.handle(
   "telegram:forwardMessages",
@@ -433,6 +451,16 @@ ipcMain.handle("log:findAll", async (_, { campaignId, limit, skip } = {}) => {
   }
 });
 
+ipcMain.handle("log:deleteAll", async () => {
+  const PostLog = require("./models/PostLog");
+  try {
+    await PostLog.deleteAll();
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle("log:getStats", async () => {
   const PostLog = require("./models/PostLog");
   try {
@@ -512,9 +540,11 @@ app.whenReady().then(async () => {
 
   // Start Background Automation Scheduler
   try {
+    const PostCampaign = require("./models/PostCampaign");
+    await PostCampaign.updateMany({}, { isRunning: false });
     const autoPostService = require("./autoPostService");
     autoPostService.start();
-    console.log("[Scheduler] AutoPost Background jobs started");
+    console.log("[Scheduler] AutoPost Background jobs started and campaigns reset to stopped");
   } catch (err) {
     console.warn("[Scheduler] Failed to start:", err.message);
   }

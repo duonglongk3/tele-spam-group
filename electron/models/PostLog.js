@@ -59,13 +59,6 @@ class Query {
   lean() {
     return Promise.resolve(this.items.map((item) => ({ ...item })));
   }
-
-  then(resolve, reject) {
-    return Promise.resolve(this.items.map((item) => ({ ...item }))).then(
-      resolve,
-      reject,
-    );
-  }
 }
 
 class QueryLoader {
@@ -103,18 +96,14 @@ class QueryLoader {
 
     const query = new Query(items);
     if (this.sortObj) query.sort(this.sortObj);
-    if (this.skipCount) query.skip(this.skipCount);
+    if (this.skipCount !== null) query.skip(this.skipCount);
     if (this.limitCount !== null) query.limit(this.limitCount);
     return query;
   }
 
   async lean() {
     const query = await this.exec();
-    return query.lean();
-  }
-
-  then(resolve, reject) {
-    return this.exec().then((query) => query.then(resolve, reject), reject);
+    return query.items.map((item) => ({ ...item }));
   }
 }
 
@@ -141,6 +130,10 @@ class PostLogModel {
           matchesCondition(item[key], expected),
         ),
       ).length;
+  }
+
+  static async deleteAll() {
+    await run(`DELETE FROM post_logs`);
   }
 }
 

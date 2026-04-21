@@ -1,6 +1,15 @@
 const { randomUUID } = require("crypto");
 const { all, get, run } = require("../db");
 
+function normalizeDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function normalizeTarget(target = {}) {
   return {
     chatId: target.chatId || "",
@@ -14,7 +23,9 @@ function normalizeTarget(target = {}) {
       ? target.scheduleType
       : "global",
     customSchedule: target.customSchedule || "",
-    nextRunAt: target.nextRunAt || null,
+    nextRunAt: normalizeDate(target.nextRunAt),
+    dailySentCount: Number.isFinite(target.dailySentCount) ? target.dailySentCount : 0,
+    dailySentDate: target.dailySentDate || '',
     isDisabled: !!target.isDisabled,
     lastError: target.lastError || "",
   };
@@ -22,6 +33,11 @@ function normalizeTarget(target = {}) {
 
 function normalizeCampaign(data = {}, existing = {}) {
   const now = new Date().toISOString();
+  const actionButtons = Array.isArray(data.actionButtons)
+    ? data.actionButtons
+    : Array.isArray(existing.actionButtons)
+      ? existing.actionButtons
+      : [];
   return {
     _id: data._id || existing._id || randomUUID(),
     name: data.name || existing.name || "",
@@ -40,7 +56,19 @@ function normalizeCampaign(data = {}, existing = {}) {
     imagePaths: Array.isArray(data.imagePaths)
       ? data.imagePaths
       : existing.imagePaths || [],
-    schedule: data.schedule || existing.schedule || "60-240",
+    sendViaBot:
+      typeof data.sendViaBot === "boolean"
+        ? data.sendViaBot
+        : !!existing.sendViaBot,
+    actionButtons: actionButtons
+      .filter((button) => button && typeof button === "object")
+      .map((button) => ({
+        text: button.text || "",
+        url: button.url || "",
+      })),
+    delayBetweenPosts: data.delayBetweenPosts || existing.delayBetweenPosts || "10-20",
+    maxPostsPerDay:
+      Number.isFinite(data.maxPostsPerDay) ? data.maxPostsPerDay : Number(existing.maxPostsPerDay || 3),
     firstRunMode:
       ["immediate", "random"].includes(data.firstRunMode)
         ? data.firstRunMode
@@ -98,7 +126,10 @@ class PostCampaignModel {
       contentTemplate: this.contentTemplate,
       quoteText: this.quoteText,
       imagePaths: this.imagePaths,
-      schedule: this.schedule,
+      sendViaBot: this.sendViaBot,
+      actionButtons: this.actionButtons,
+      delayBetweenPosts: this.delayBetweenPosts,
+      maxPostsPerDay: this.maxPostsPerDay,
       firstRunMode: this.firstRunMode,
       autoDeleteHours: this.autoDeleteHours,
       isRunning: this.isRunning,

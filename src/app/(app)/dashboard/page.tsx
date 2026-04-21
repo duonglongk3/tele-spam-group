@@ -1,5 +1,6 @@
 'use client'
 
+import Link from 'next/link'
 import { useState, useEffect } from "react"
 import { Users, Activity, Send, CheckCircle, XCircle, Clock } from "lucide-react"
 import { telegramApi } from "@/lib/telegram"
@@ -107,7 +108,7 @@ export default function DashboardPage() {
             <Activity className="w-5 h-5 text-blue-500" />
             <h3 className="font-semibold text-lg">Hoạt động gần đây</h3>
           </div>
-          <a href="/logs" className="text-sm text-blue-600 hover:underline font-medium">Xem tất cả</a>
+          <Link href="/logs" className="text-sm text-blue-600 hover:underline font-medium">Xem tất cả</Link>
         </div>
         <div className="divide-y divide-gray-100">
           {recentLogs.length === 0 && (

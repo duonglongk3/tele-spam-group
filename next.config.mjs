@@ -20,14 +20,16 @@ const nextConfig = {
     // !! WARN !!
     ignoreBuildErrors: true,
   },
-  async rewrites() {
-    return [
-      {
-        source: '/webhook',
-        destination: 'http://127.0.0.1:3001/webhook'
-      }
-    ];
-  }
+  ...(process.env.ELECTRON_BUILD !== 'true' ? {
+    async rewrites() {
+      return [
+        {
+          source: '/webhook',
+          destination: 'http://127.0.0.1:3001/webhook'
+        }
+      ];
+    }
+  } : {})
 }
 
 export default nextConfig
