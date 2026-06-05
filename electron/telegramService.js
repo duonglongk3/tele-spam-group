@@ -32,6 +32,50 @@ class TelegramMultiClient {
         }
     }
 
+    async simulateHumanActivity(client, peer) {
+        try {
+            const entity = await this.resolveEntity(client, peer);
+            // Simulate reading chat history
+            const messages = await client.getMessages(entity, { limit: 5 });
+            if (messages && messages.length > 0) {
+                if (entity.className === 'Channel') {
+                    await client.invoke(new Api.channels.ReadHistory({
+                        channel: entity,
+                        maxId: messages[0].id
+                    }));
+                } else if (entity.className === 'Chat' || entity.className === 'User') {
+                    await client.invoke(new Api.messages.ReadHistory({
+                        peer: entity,
+                        maxId: messages[0].id
+                    }));
+                }
+            }
+            console.log(`[Anti-Spam] Simulated human activity (read history) for peer: ${peer}`);
+        } catch (e) {
+            console.log(`[Anti-Spam] simulateHumanActivity log (non-fatal): ${e.message}`);
+        }
+    }
+
+    async simulateTyping(client, peer, actionType = 'text') {
+        try {
+            const entity = await this.resolveEntity(client, peer);
+            let action = new Api.SendMessageTypingAction();
+            if (actionType === 'photo' || actionType === 'media') {
+                action = new Api.SendMessageUploadPhotoAction({ progress: 50 });
+            }
+            await client.invoke(new Api.messages.SetTyping({
+                peer: entity,
+                action
+            }));
+            const delay = 1500 + Math.random() * 2000; // 1.5s to 3.5s delay
+            await new Promise(r => setTimeout(r, delay));
+            console.log(`[Anti-Spam] Simulated typing for peer: ${peer} (${actionType})`);
+        } catch (e) {
+            console.log(`[Anti-Spam] simulateTyping log (non-fatal): ${e.message}`);
+        }
+    }
+
+
     /**
      * Resolve a chatId to an entity, trying common ID format variations.
      * Fails fast if entity can't be found — no aggressive retries.
@@ -377,10 +421,19 @@ class TelegramMultiClient {
 
             const accName = this.accounts.get(accountId).firstName;
             try {
+                let targetPeer = publicUsername;
                 if (hash) {
-                    await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+                    const res = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+                    if (res && res.chats && res.chats.length > 0) {
+                        targetPeer = res.chats[0].id.toString();
+                    }
                 } else if (publicUsername) {
                     await client.invoke(new Api.channels.JoinChannel({ channel: publicUsername }));
+                }
+                
+                if (targetPeer) {
+                    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1500));
+                    await this.simulateHumanActivity(client, targetPeer);
                 }
                 results.push(`🟢 [${accName}]: Vào thành công`);
             } catch (err) {
@@ -393,8 +446,6 @@ class TelegramMultiClient {
                      results.push(`🔴 [${accName}]: Lỗi - ${err.message}`);
                  }
             }
-            // Delay chối chết (2s)
-            await new Promise(r => setTimeout(r, 2000));
         }
         return results;
     }
@@ -434,6 +485,7 @@ class TelegramMultiClient {
                     return {
                         id: d.id.toString(),
                         title: d.title,
+                        username: entity.username || '',
                         isGroup: d.isGroup,
                         isChannel: d.isChannel,
                         isForum,
@@ -476,14 +528,38 @@ class TelegramMultiClient {
         return this.withAccount(accountId, async (client) => {
             const entity = await this.resolveEntity(client, chatId);
             const messages = await client.getMessages(entity, { limit });
-            return messages.map(m => ({
-                id: m.id,
-                text: m.text || '',
-                date: m.date,
-                hasMedia: !!m.media,
-                mediaType: m.media?.className || null,
-                fromId: m.fromId?.userId?.toString() || null,
-            }));
+            return messages.map(m => {
+                let replyMarkup = null;
+                if (m.replyMarkup && m.replyMarkup.rows) {
+                    replyMarkup = {
+                        rows: m.replyMarkup.rows.map(row => ({
+                            buttons: (row.buttons || []).map(btn => {
+                                let dataBase64 = null;
+                                if (btn.data) {
+                                    dataBase64 = Buffer.isBuffer(btn.data)
+                                        ? btn.data.toString('base64')
+                                        : btn.data.toString();
+                                }
+                                return {
+                                    className: btn.className,
+                                    text: btn.text,
+                                    url: btn.url || null,
+                                    data: dataBase64
+                                };
+                            })
+                        }))
+                    };
+                }
+                return {
+                    id: m.id,
+                    text: m.text || '',
+                    date: m.date,
+                    hasMedia: !!m.media,
+                    mediaType: m.media?.className || null,
+                    fromId: m.fromId?.userId?.toString() || null,
+                    replyMarkup
+                };
+            });
         });
     }
 
@@ -526,22 +602,37 @@ class TelegramMultiClient {
                 };
 
                 // 1. Scan Admins for Bots
+                const adminIds = new Set();
                 try {
-                    const participants = await client.invoke(
-                        new Api.channels.GetParticipants({
-                            channel: entity,
-                            filter: new Api.ChannelParticipantsAdmins(),
-                            offset: 0,
-                            limit: 100,
-                            hash: BigInt(0),
-                        })
-                    );
-                    const adminIds = new Set();
-                    if (participants && participants.users) {
-                        for (let u of participants.users) {
-                            adminIds.add(u.id.toString());
-                            if (u.bot) {
-                                result.adminBots.push(`@${u.username || u.firstName}`);
+                    if (entity.className === 'Channel') {
+                        const participants = await client.invoke(
+                            new Api.channels.GetParticipants({
+                                channel: entity,
+                                filter: new Api.ChannelParticipantsAdmins(),
+                                offset: 0,
+                                limit: 100,
+                                hash: BigInt(0),
+                            })
+                        );
+                        if (participants && participants.users) {
+                            for (let u of participants.users) {
+                                adminIds.add(u.id.toString());
+                                if (u.bot) {
+                                    result.adminBots.push(`@${u.username || u.firstName}`);
+                                }
+                            }
+                        }
+                    } else if (entity.className === 'Chat') {
+                        const fullChatRes = await client.invoke(new Api.messages.GetFullChat({ chatId: entity.id }));
+                        const chatParticipants = fullChatRes.fullChat?.participants?.participants || [];
+                        const users = fullChatRes.users || [];
+                        
+                        const admins = chatParticipants.filter(p => p.className === 'ChatParticipantCreator' || p.className === 'ChatParticipantAdmin');
+                        for (let p of admins) {
+                            adminIds.add(p.userId.toString());
+                            const user = users.find(u => u.id.toString() === p.userId.toString());
+                            if (user && user.bot) {
+                                result.adminBots.push(`@${user.username || user.firstName}`);
                             }
                         }
                     }
@@ -745,10 +836,15 @@ class TelegramMultiClient {
                             }
                         }
 
-                        // Kiểm tra Bot Inline (nếu cần tương lai)
-                        if (rights.sendInline && (result.content.hasTags || result.content.hasLinks)) {
-                            if (report.status !== 'ERROR') report.status = 'WARNING';
-                            report.reasons.push('Cảnh báo: Nhóm chặn Bot Inline, có thể bị lỗi nếu dùng bot để tạo phím bấm/share.');
+                        // Kiểm tra Bot Inline
+                        if (rights.sendInline) {
+                            if (campaignPayload.actionButtons && campaignPayload.actionButtons.length > 0) {
+                                report.status = 'ERROR';
+                                report.reasons.push('Xung đột: Chiến dịch sử dụng Nút Bấm Hành Động (Action Buttons), nhưng nhóm cấm Bot Inline (không thể gửi nút bấm).');
+                            } else if (result.content.hasTags || result.content.hasLinks) {
+                                if (report.status !== 'ERROR') report.status = 'WARNING';
+                                report.reasons.push('Cảnh báo: Nhóm chặn Bot Inline, có thể bị lỗi nếu dùng bot để tạo phím bấm/share.');
+                            }
                         }
 
                         // Kiểm tra Forward chống Anti-Spam Bot
@@ -807,7 +903,11 @@ class TelegramMultiClient {
     async addMember(accountId, groupId, userId) {
         return this.withAccount(accountId, async (client) => {
             const channel = await this.resolveEntity(client, groupId);
-            const user = await client.getEntity(userId);
+            const user = await this.resolveEntity(client, userId);
+
+            await this.simulateHumanActivity(client, channel);
+            await new Promise(r => setTimeout(r, 1000 + Math.random() * 1500));
+
             await client.invoke(new Api.channels.InviteToChannel({ channel, users: [user] }));
             return { success: true };
         });
@@ -816,7 +916,7 @@ class TelegramMultiClient {
     async removeMember(accountId, groupId, userId) {
         return this.withAccount(accountId, async (client) => {
             const channel = await this.resolveEntity(client, groupId);
-            const user = await client.getEntity(userId);
+            const user = await this.resolveEntity(client, userId);
             await client.invoke(new Api.channels.EditBanned({
                 channel,
                 participant: user,
@@ -869,6 +969,604 @@ class TelegramMultiClient {
                     this._saveAccounts();
                 }
                 return { success: true, account: this.accounts.get(accountId) };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async updateUsername(accountId, username) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                await client.invoke(new Api.account.UpdateUsername({ username }));
+                const me = await client.getMe();
+                const account = this.accounts.get(accountId);
+                if (account) {
+                    account.username = me.username;
+                    this.accounts.set(accountId, account);
+                    this._saveAccounts();
+                }
+                return { success: true, username: me.username };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async uploadProfilePhoto(accountId, base64Image) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const base64Data = base64Image.replace(/^data:image\/\w+;base64,/, "");
+                const buffer = Buffer.from(base64Data, 'base64');
+                const { CustomFile } = require('telegram/client/uploads');
+                const file = await client.uploadFile({
+                    file: new CustomFile("avatar.jpg", buffer.length, "avatar.jpg", buffer),
+                    workers: 1
+                });
+                await client.invoke(new Api.photos.UploadProfilePhoto({ file }));
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async deleteProfilePhoto(accountId) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const photos = await client.invoke(new Api.photos.GetUserPhotos({
+                    userId: 'me',
+                    offset: 0,
+                    limit: 1,
+                    maxId: 0
+                }));
+                if (photos && photos.photos && photos.photos.length > 0) {
+                    const photo = photos.photos[0];
+                    await client.invoke(new Api.photos.DeletePhotos({
+                        id: [new Api.InputPhoto({ id: photo.id, accessHash: photo.accessHash })]
+                    }));
+                    return { success: true };
+                }
+                return { success: false, error: 'No profile photo found' };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async setPrivacySettings(accountId, rules) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const { statusRule, phoneRule } = rules;
+                const mapRule = (ruleStr) => {
+                    if (ruleStr === 'contacts') return new Api.InputPrivacyRuleAllowContacts();
+                    if (ruleStr === 'all') return new Api.InputPrivacyRuleAllowAll();
+                    return new Api.InputPrivacyRuleDisallowAll();
+                };
+
+                if (statusRule) {
+                    await client.invoke(new Api.account.SetPrivacy({
+                        key: new Api.InputPrivacyKeyStatusTimestamp(),
+                        rules: [mapRule(statusRule)]
+                    }));
+                }
+                if (phoneRule) {
+                    await client.invoke(new Api.account.SetPrivacy({
+                        key: new Api.InputPrivacyKeyPhoneNumber(),
+                        rules: [mapRule(phoneRule)]
+                    }));
+                }
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async manageContacts(accountId, action, payload) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                if (action === 'get') {
+                    const contacts = await client.invoke(new Api.contacts.GetContacts({ hash: BigInt(0) }));
+                    const users = (contacts.users || []).map(u => ({
+                        id: u.id.toString(),
+                        firstName: u.firstName || '',
+                        lastName: u.lastName || '',
+                        username: u.username || '',
+                        phone: u.phone || '',
+                        mutual: u.mutualContact || false
+                    }));
+                    return { success: true, contacts: users };
+                } else if (action === 'add') {
+                    const { phone, firstName, lastName } = payload;
+                    const res = await client.invoke(new Api.contacts.ImportContacts({
+                        contacts: [
+                            new Api.InputPhoneContact({
+                                clientId: BigInt(Date.now()),
+                                phone,
+                                firstName: firstName || '',
+                                lastName: lastName || ''
+                            })
+                        ]
+                    }));
+                    return { success: true, result: res };
+                } else if (action === 'delete') {
+                    const { userId } = payload;
+                    const user = await client.getEntity(userId);
+                    await client.invoke(new Api.contacts.DeleteContacts({
+                        id: [user.id]
+                    }));
+                    return { success: true };
+                }
+                return { success: false, error: 'Invalid action' };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async createChat(accountId, title, users, isMega, about) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const resolvedUsers = [];
+                for (const u of users) {
+                    try {
+                        const ent = await client.getEntity(u);
+                        resolvedUsers.push(ent);
+                    } catch (_) {}
+                }
+
+                if (isMega) {
+                    const res = await client.invoke(new Api.channels.CreateChannel({
+                        title,
+                        about: about || '',
+                        megagroup: true
+                    }));
+                    return { success: true, chat: res };
+                } else {
+                    const res = await client.invoke(new Api.messages.CreateChat({
+                        users: resolvedUsers,
+                        title
+                    }));
+                    return { success: true, chat: res };
+                }
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async editBanned(accountId, chatId, usernameOrId, action) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const channel = await this.resolveEntity(client, chatId);
+                const participant = await client.getEntity(usernameOrId);
+                
+                let rights;
+                if (action === 'ban') {
+                    rights = new Api.ChatBannedRights({
+                        untilDate: 0,
+                        viewMessages: true,
+                        sendMessages: true,
+                        sendMedia: true,
+                        sendStickers: true,
+                        sendGifs: true,
+                        embedLinks: true
+                    });
+                } else if (action === 'kick') {
+                    rights = new Api.ChatBannedRights({
+                        untilDate: 0,
+                        viewMessages: true,
+                        sendMessages: true
+                    });
+                } else if (action === 'mute') {
+                    rights = new Api.ChatBannedRights({
+                        untilDate: 0,
+                        viewMessages: false,
+                        sendMessages: true
+                    });
+                } else if (action === 'unban' || action === 'unmute') {
+                    rights = new Api.ChatBannedRights({
+                        untilDate: 0,
+                        viewMessages: false,
+                        sendMessages: false,
+                        sendMedia: false,
+                        sendStickers: false,
+                        sendGifs: false,
+                        embedLinks: false
+                    });
+                }
+
+                await client.invoke(new Api.channels.EditBanned({
+                    channel,
+                    participant,
+                    bannedRights: rights
+                }));
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async createForumTopic(accountId, chatId, title) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const channel = await this.resolveEntity(client, chatId);
+                const res = await client.invoke(new Api.channels.CreateForumTopic({
+                    channel,
+                    title
+                }));
+                return { success: true, topic: res };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async editForumTopic(accountId, chatId, topicId, title, closed) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const channel = await this.resolveEntity(client, chatId);
+                await client.invoke(new Api.channels.EditForumTopic({
+                    channel,
+                    id: Number(topicId),
+                    title: title || undefined,
+                    closed: closed !== undefined ? closed : undefined
+                }));
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async executeQuickAction(accountId, chatId, actionType, payload) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const target = await this.resolveEntity(client, chatId);
+                if (actionType === 'send_text') {
+                    await this.simulateTyping(client, target, 'text');
+                    await client.sendMessage(target, {
+                        message: payload.message,
+                        parseMode: payload.parseMode || 'html'
+                    });
+                } else if (actionType === 'send_photo') {
+                    const base64Data = payload.image.replace(/^data:image\/\w+;base64,/, "");
+                    const buffer = Buffer.from(base64Data, 'base64');
+                    const { CustomFile } = require('telegram/client/uploads');
+                    const file = new CustomFile("photo.jpg", buffer.length, "photo.jpg", buffer);
+                    await this.simulateTyping(client, target, 'photo');
+                    await client.sendFile(target, {
+                        file,
+                        caption: payload.caption,
+                        parseMode: payload.parseMode || 'html'
+                    });
+                } else if (actionType === 'send_location') {
+                    await this.simulateHumanActivity(client, target);
+                    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+                    await this.simulateTyping(client, target, 'text');
+                    await client.invoke(new Api.messages.SendMedia({
+                        peer: target,
+                        media: new Api.InputMediaGeoPoint({
+                            geoPoint: new Api.InputGeoPoint({
+                                lat: Number(payload.lat),
+                                long: Number(payload.long)
+                            })
+                        }),
+                        message: ""
+                    }));
+                } else if (actionType === 'send_poll') {
+                    const pollQuestion = typeof Api.TextWithEntities === 'function'
+                        ? new Api.TextWithEntities({ text: payload.question, entities: [] })
+                        : payload.question;
+
+                    const pollAnswers = payload.options.map((opt, idx) => {
+                        const textObj = typeof Api.TextWithEntities === 'function'
+                            ? new Api.TextWithEntities({ text: opt, entities: [] })
+                            : opt;
+                        return new Api.PollAnswer({
+                            text: textObj,
+                            option: Buffer.from(idx.toString())
+                        });
+                    });
+
+                    await this.simulateHumanActivity(client, target);
+                    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1000));
+                    await this.simulateTyping(client, target, 'text');
+                    await client.invoke(new Api.messages.SendMedia({
+                        peer: target,
+                        media: new Api.InputMediaPoll({
+                            poll: new Api.Poll({
+                                id: BigInt(Date.now()),
+                                question: pollQuestion,
+                                answers: pollAnswers,
+                                closed: false,
+                                multipleChoice: false
+                            })
+                        }),
+                        message: ""
+                    }));
+                } else if (actionType === 'forward') {
+                    const fromPeer = await this.resolveEntity(client, payload.fromChatId);
+                    await this.simulateHumanActivity(client, target);
+                    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1500));
+                    await client.forwardMessages(target, {
+                        messages: payload.messageIds,
+                        fromPeer
+                    });
+                } else if (actionType === 'pin') {
+                    await client.pinMessage(target, payload.messageId, {
+                        notify: payload.notify || false
+                    });
+                } else if (actionType === 'unpin') {
+                    await client.unpinMessage(target, payload.messageId);
+                } else if (actionType === 'reaction') {
+                    await client.invoke(new Api.messages.SendReaction({
+                        peer: target,
+                        msgId: payload.messageId,
+                        reaction: [new Api.ReactionEmoji({ emoticon: payload.emoticon })]
+                    }));
+                } else if (actionType === 'edit_message') {
+                    await client.editMessage(target, {
+                        message: payload.messageId,
+                        text: payload.text
+                    });
+                } else if (actionType === 'delete_message') {
+                    await client.deleteMessages(target, [payload.messageId], {
+                        revoke: payload.revoke !== undefined ? payload.revoke : true
+                    });
+                } else {
+                    return { success: false, error: 'Unknown action type: ' + actionType };
+                }
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async searchGlobalChats(accountId, query) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const result = await client.invoke(new Api.contacts.Search({
+                    q: query,
+                    limit: 20
+                }));
+                const chats = (result.chats || []).map(c => {
+                    let type = 'Group';
+                    if (c.className === 'Channel') {
+                        type = c.broadcast ? 'Channel' : 'Group';
+                    }
+                    return {
+                        id: c.id.toString(),
+                        title: c.title,
+                        username: c.username || '',
+                        participantsCount: c.participantsCount || null,
+                        type
+                    };
+                });
+                return { success: true, chats };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async getParticipants(accountId, chatId, limit = 100, offset = 0) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const entity = await this.resolveEntity(client, chatId);
+                if (entity.className === 'Channel') {
+                    const res = await client.invoke(new Api.channels.GetParticipants({
+                        channel: entity,
+                        filter: new Api.ChannelParticipantsRecent(),
+                        offset: Number(offset) || 0,
+                        limit: Number(limit) || 100,
+                        hash: BigInt(0)
+                    }));
+                    const users = (res.users || []).map(u => ({
+                        id: u.id.toString(),
+                        firstName: u.firstName || '',
+                        lastName: u.lastName || '',
+                        username: u.username || '',
+                        phone: u.phone || '',
+                        bot: u.bot || false
+                    }));
+                    return { success: true, participants: users };
+                } else if (entity.className === 'Chat') {
+                    const res = await client.invoke(new Api.messages.GetFullChat({
+                        chatId: entity.id
+                    }));
+                    const users = (res.users || []).map(u => ({
+                        id: u.id.toString(),
+                        firstName: u.firstName || '',
+                        lastName: u.lastName || '',
+                        username: u.username || '',
+                        phone: u.phone || '',
+                        bot: u.bot || false
+                    }));
+                    return { success: true, participants: users };
+                } else {
+                    return { success: false, error: 'Không phải là nhóm hoặc kênh (Not a group/channel)' };
+                }
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async updateGroupProfile(accountId, chatId, { title, about, base64Photo }) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const entity = await this.resolveEntity(client, chatId);
+                
+                // 1. Update Title
+                if (title !== undefined && title.trim() !== '') {
+                    if (entity.className === 'Channel') {
+                        await client.invoke(new Api.channels.EditTitle({ channel: entity, title }));
+                    } else if (entity.className === 'Chat') {
+                        await client.invoke(new Api.messages.EditChatTitle({ chatId: entity.id, title }));
+                    }
+                }
+                
+                // 2. Update Description
+                if (about !== undefined) {
+                    await client.invoke(new Api.messages.EditChatAbout({ peer: entity, about }));
+                }
+
+                // 3. Update Photo
+                if (base64Photo) {
+                    const base64Data = base64Photo.replace(/^data:image\/\w+;base64,/, "");
+                    const buffer = Buffer.from(base64Data, 'base64');
+                    const { CustomFile } = require('telegram/client/uploads');
+                    const file = await client.uploadFile({
+                        file: new CustomFile("group_avatar.jpg", buffer.length, "group_avatar.jpg", buffer),
+                        workers: 1
+                    });
+                    
+                    if (entity.className === 'Channel') {
+                        await client.invoke(new Api.channels.EditPhoto({
+                            channel: entity,
+                            photo: new Api.InputChatUploadedPhoto({ file })
+                        }));
+                    } else if (entity.className === 'Chat') {
+                        await client.invoke(new Api.messages.EditChatPhoto({
+                            chatId: entity.id,
+                            photo: new Api.InputChatUploadedPhoto({ file })
+                        }));
+                    }
+                }
+
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async editAdmin(accountId, chatId, userId, adminRights, rank) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const channel = await this.resolveEntity(client, chatId);
+                const user = await client.getEntity(userId);
+
+                if (channel.className !== 'Channel') {
+                    return { success: false, error: 'Chức năng bổ nhiệm Admin nâng cao chỉ hỗ trợ Siêu nhóm (Supergroup) và Kênh (Channel)' };
+                }
+
+                const rights = new Api.ChatAdminRights({
+                    changeInfo: adminRights.changeInfo !== undefined ? !!adminRights.changeInfo : true,
+                    postMessages: adminRights.postMessages !== undefined ? !!adminRights.postMessages : true,
+                    editMessages: adminRights.editMessages !== undefined ? !!adminRights.editMessages : true,
+                    deleteMessages: adminRights.deleteMessages !== undefined ? !!adminRights.deleteMessages : true,
+                    banUsers: adminRights.banUsers !== undefined ? !!adminRights.banUsers : true,
+                    inviteUsers: adminRights.inviteUsers !== undefined ? !!adminRights.inviteUsers : true,
+                    pinMessages: adminRights.pinMessages !== undefined ? !!adminRights.pinMessages : true,
+                    addAdmins: adminRights.addAdmins !== undefined ? !!adminRights.addAdmins : false,
+                    anonymous: adminRights.anonymous !== undefined ? !!adminRights.anonymous : false,
+                    manageCall: adminRights.manageCall !== undefined ? !!adminRights.manageCall : true,
+                    other: adminRights.other !== undefined ? !!adminRights.other : true
+                });
+
+                await client.invoke(new Api.channels.EditAdmin({
+                    channel,
+                    userId: user,
+                    adminRights: rights,
+                    rank: rank || ''
+                }));
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async clickBotButton(accountId, chatId, messageId, buttonData) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const peer = await this.resolveEntity(client, chatId);
+                const data = Buffer.from(buttonData, 'base64');
+                const res = await client.invoke(new Api.messages.GetBotCallbackAnswer({
+                    peer,
+                    msgId: Number(messageId),
+                    data: data
+                }));
+                return { success: true, answer: res };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async joinChat(accountId, linkOrUsername) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                let hash = '';
+                let publicUsername = '';
+                const link = linkOrUsername.trim();
+
+                if (link.includes('+')) hash = link.split('+')[1].split('?')[0];
+                else if (link.includes('joinchat/')) hash = link.split('joinchat/')[1].split('?')[0];
+                else if (link.includes('t.me/')) publicUsername = link.split('t.me/')[1].split('/')[0].split('?')[0];
+                else publicUsername = link.replace('@', '');
+
+                let targetPeer = publicUsername;
+                if (hash) {
+                    const res = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+                    if (res && res.chats && res.chats.length > 0) {
+                        targetPeer = res.chats[0].id.toString();
+                    }
+                } else if (publicUsername) {
+                    await client.invoke(new Api.channels.JoinChannel({ channel: publicUsername }));
+                } else {
+                    throw new Error('Đường dẫn hoặc username không hợp lệ');
+                }
+
+                if (targetPeer) {
+                    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1500));
+                    await this.simulateHumanActivity(client, targetPeer);
+                }
+
+                return { success: true };
+            } catch (err) {
+                return { success: false, error: err.message };
+            }
+        });
+    }
+
+    async getInviteLink(accountId, chatId) {
+        return this.withAccount(accountId, async (client) => {
+            try {
+                const entity = await this.resolveEntity(client, chatId);
+                let fullChat;
+                if (entity.className === 'Channel') {
+                    const res = await client.invoke(new Api.channels.GetFullChannel({ channel: entity }));
+                    fullChat = res.fullChat;
+                } else if (entity.className === 'Chat') {
+                    const res = await client.invoke(new Api.messages.GetFullChat({ chatId: entity.id }));
+                    fullChat = res.fullChat;
+                } else {
+                    return { success: false, error: 'Không hỗ trợ loại chat này' };
+                }
+
+                if (fullChat && fullChat.exportedInvite && fullChat.exportedInvite.link) {
+                    return { success: true, link: fullChat.exportedInvite.link };
+                }
+
+                // Try to export a new invite link if it doesn't exist
+                try {
+                    const res = await client.invoke(new Api.messages.ExportChatInvite({
+                        peer: entity
+                    }));
+                    if (res && res.link) {
+                        return { success: true, link: res.link };
+                    }
+                } catch (e) {
+                    console.error('[Export Invite Link Error]', e.message);
+                }
+
+                return { success: false, error: 'Không thể lấy link mời. Bạn cần có quyền Quản trị viên mời thành viên.' };
             } catch (err) {
                 return { success: false, error: err.message };
             }

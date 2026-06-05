@@ -188,6 +188,23 @@ ipcMain.handle("workspace:import", async () => {
   }
 });
 
+// IPC: Chọn hình ảnh cho bài đăng
+ipcMain.handle("app:selectImage", async () => {
+  try {
+    const { dialog } = require("electron");
+    const { filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: "Chọn hình ảnh cho bài đăng",
+      filters: [{ name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp"] }],
+      properties: ["openFile"],
+    });
+    if (!filePaths || filePaths.length === 0)
+      return { success: false, error: "Cancelled" };
+    return { success: true, filePath: filePaths[0] };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // IPC: Telegram Accounts
 ipcMain.handle("telegram:getAccounts", () => {
   const telegramService = require("./telegramService");
@@ -372,6 +389,234 @@ ipcMain.handle(
         lastName,
         about,
       });
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:updateUsername",
+  async (_, { accountId, username }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.updateUsername(accountId, username);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:uploadProfilePhoto",
+  async (_, { accountId, base64Image }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.uploadProfilePhoto(accountId, base64Image);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:deleteProfilePhoto",
+  async (_, { accountId }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.deleteProfilePhoto(accountId);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:setPrivacySettings",
+  async (_, { accountId, rules }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.setPrivacySettings(accountId, rules);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:manageContacts",
+  async (_, { accountId, action, payload }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.manageContacts(accountId, action, payload);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:createChat",
+  async (_, { accountId, title, users, isMega, about }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.createChat(accountId, title, users, isMega, about);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:editBanned",
+  async (_, { accountId, chatId, usernameOrId, action }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.editBanned(accountId, chatId, usernameOrId, action);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:createForumTopic",
+  async (_, { accountId, chatId, title }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.createForumTopic(accountId, chatId, title);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:editForumTopic",
+  async (_, { accountId, chatId, topicId, title, closed }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.editForumTopic(accountId, chatId, topicId, title, closed);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:addMember",
+  async (_, { accountId, chatId, userId }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.addMember(accountId, chatId, userId);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:removeMember",
+  async (_, { accountId, chatId, userId }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.removeMember(accountId, chatId, userId);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:executeQuickAction",
+  async (_, { accountId, chatId, actionType, payload }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.executeQuickAction(accountId, chatId, actionType, payload);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:searchGlobalChats",
+  async (_, { accountId, query }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.searchGlobalChats(accountId, query);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:joinChat",
+  async (_, { accountId, linkOrUsername }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.joinChat(accountId, linkOrUsername);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:getInviteLink",
+  async (_, { accountId, chatId }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.getInviteLink(accountId, chatId);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:getParticipants",
+  async (_, { accountId, chatId, limit, offset }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.getParticipants(accountId, chatId, limit, offset);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:updateGroupProfile",
+  async (_, { accountId, chatId, title, about, base64Photo }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.updateGroupProfile(accountId, chatId, { title, about, base64Photo });
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:editAdmin",
+  async (_, { accountId, chatId, userId, adminRights, rank }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.editAdmin(accountId, chatId, userId, adminRights, rank);
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  },
+);
+
+ipcMain.handle(
+  "telegram:clickBotButton",
+  async (_, { accountId, chatId, messageId, buttonData }) => {
+    const telegramService = require("./telegramService");
+    try {
+      return await telegramService.clickBotButton(accountId, chatId, messageId, buttonData);
     } catch (err) {
       return { success: false, error: err.message };
     }

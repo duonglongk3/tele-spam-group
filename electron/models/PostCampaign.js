@@ -77,6 +77,14 @@ function normalizeCampaign(data = {}, existing = {}) {
       Number.isFinite(data.autoDeleteHours)
         ? data.autoDeleteHours
         : Number(existing.autoDeleteHours || 0),
+    useAI:
+      typeof data.useAI === "boolean"
+        ? data.useAI
+        : !!existing.useAI,
+    obfuscateLinks:
+      typeof data.obfuscateLinks === "boolean"
+        ? data.obfuscateLinks
+        : !!existing.obfuscateLinks,
     isRunning:
       typeof data.isRunning === "boolean"
         ? data.isRunning
@@ -132,6 +140,8 @@ class PostCampaignModel {
       maxPostsPerDay: this.maxPostsPerDay,
       firstRunMode: this.firstRunMode,
       autoDeleteHours: this.autoDeleteHours,
+      useAI: this.useAI,
+      obfuscateLinks: this.obfuscateLinks,
       isRunning: this.isRunning,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,

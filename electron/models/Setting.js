@@ -9,6 +9,7 @@ class GlobalSetting {
     this.telegramBotUsername = data.telegramBotUsername || "";
     this.telegramWebhookUrl =
       data.telegramWebhookUrl || "https://d5x1qljf-3000.asse.devtunnels.ms/";
+    this.openaiApiKey = data.openaiApiKey || "";
     this.updatedAt = data.updatedAt || new Date().toISOString();
     this.createdAt = data.createdAt || new Date().toISOString();
   }
@@ -34,6 +35,7 @@ class GlobalSetting {
       telegramPairToken: this.telegramPairToken,
       telegramBotUsername: this.telegramBotUsername,
       telegramWebhookUrl: this.telegramWebhookUrl,
+      openaiApiKey: this.openaiApiKey,
       updatedAt: this.updatedAt,
       createdAt: this.createdAt,
     };

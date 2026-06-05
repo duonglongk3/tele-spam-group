@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { 
   Users2, Plus, Trash2, Phone, ShieldCheck, KeyRound, 
-  Import, ArrowLeft, CheckCircle, Edit, X
+  Import, ArrowLeft, CheckCircle, Edit, X, BookOpen, Image, Trash
 } from "lucide-react"
 import { telegramApi } from "@/lib/telegram"
 import { toast } from "sonner"
@@ -38,6 +38,17 @@ export default function AccountsPage() {
   const [editFirstName, setEditFirstName] = useState('')
   const [editLastName, setEditLastName] = useState('')
   const [editAbout, setEditAbout] = useState('')
+  const [editUsername, setEditUsername] = useState('')
+  const [privacyStatus, setPrivacyStatus] = useState('all')
+  const [privacyPhone, setPrivacyPhone] = useState('contacts')
+
+  // Contacts Manager
+  const [contactModalAcc, setContactModalAcc] = useState<any>(null)
+  const [contactsList, setContactsList] = useState<any[]>([])
+  const [newContactPhone, setNewContactPhone] = useState('')
+  const [newContactFirstName, setNewContactFirstName] = useState('')
+  const [newContactLastName, setNewContactLastName] = useState('')
+  const [contactLoading, setContactLoading] = useState(false)
 
   useEffect(() => { 
     loadAccounts() 
@@ -118,28 +129,147 @@ export default function AccountsPage() {
     setEditFirstName(acc.firstName || '')
     setEditLastName(acc.lastName || '')
     setEditAbout(acc.about || '')
+    setEditUsername(acc.username || '')
+    setPrivacyStatus('all')
+    setPrivacyPhone('contacts')
   }
 
   const handleUpdateProfile = async () => {
     if (!editingAcc) return
     setLoading(true)
     try {
-      const res = await telegramApi.updateProfile(editingAcc.id, {
+      let res = await telegramApi.updateProfile(editingAcc.id, {
         firstName: editFirstName,
         lastName: editLastName,
         about: editAbout
       });
-      if (res?.success) {
-        setEditingAcc(null)
-        loadAccounts()
-        toast.success("Cập nhật hồ sơ thành công")
-      } else {
-        toast.error("Lỗi cập nhật: " + (res?.error || 'Unknown error'))
+      if (!res?.success) throw new Error(res?.error || "Lỗi cập nhật tên/bio");
+
+      if (editUsername !== (editingAcc.username || '')) {
+        const uRes = await telegramApi.updateUsername(editingAcc.id, editUsername);
+        if (!uRes?.success) throw new Error(uRes?.error || "Lỗi cập nhật username");
       }
+
+      const pRes = await telegramApi.setPrivacySettings(editingAcc.id, {
+        statusRule: privacyStatus,
+        phoneRule: privacyPhone
+      });
+      if (!pRes?.success) throw new Error(pRes?.error || "Lỗi cài đặt quyền riêng tư");
+
+      setEditingAcc(null)
+      loadAccounts()
+      toast.success("Cập nhật hồ sơ và cài đặt thành công")
     } catch (e: any) {
       toast.error("Lỗi cập nhật: " + e.message)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!editingAcc || !e.target.files || e.target.files.length === 0) return;
+    const file = e.target.files[0];
+    const reader = new FileReader();
+    reader.onload = async () => {
+      setLoading(true);
+      try {
+        const base64 = reader.result as string;
+        const res = await telegramApi.uploadProfilePhoto(editingAcc.id, base64);
+        if (res?.success) {
+          toast.success("Đổi ảnh đại diện thành công");
+          loadAccounts();
+        } else {
+          toast.error("Lỗi đổi ảnh: " + (res?.error || "Lỗi không xác định"));
+        }
+      } catch (err: any) {
+        toast.error("Lỗi đổi ảnh: " + err.message);
+      } finally {
+        setLoading(false);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handlePhotoDelete = async () => {
+    if (!editingAcc) return;
+    setLoading(true);
+    try {
+      const res = await telegramApi.deleteProfilePhoto(editingAcc.id);
+      if (res?.success) {
+        toast.success("Xóa ảnh đại diện thành công");
+        loadAccounts();
+      } else {
+        toast.error("Lỗi xóa ảnh: " + (res?.error || "Lỗi không xác định"));
+      }
+    } catch (err: any) {
+      toast.error("Lỗi xóa ảnh: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openContactsModal = async (acc: any) => {
+    setContactModalAcc(acc)
+    setNewContactPhone('')
+    setNewContactFirstName('')
+    setNewContactLastName('')
+    setContactLoading(true)
+    try {
+      const res = await telegramApi.manageContacts(acc.id, 'get', null)
+      if (res?.success) {
+        setContactsList(res.contacts || [])
+      } else {
+        toast.error("Lỗi tải danh bạ: " + (res?.error || "Lỗi không xác định"))
+      }
+    } catch (e: any) {
+      toast.error("Lỗi tải danh bạ: " + e.message)
+    } finally {
+      setContactLoading(false)
+    }
+  }
+
+  const handleAddContact = async () => {
+    if (!contactModalAcc || !newContactPhone.trim() || !newContactFirstName.trim()) return
+    setContactLoading(true)
+    try {
+      const res = await telegramApi.manageContacts(contactModalAcc.id, 'add', {
+        phone: newContactPhone,
+        firstName: newContactFirstName,
+        lastName: newContactLastName
+      })
+      if (res?.success) {
+        toast.success("Đã thêm liên hệ vào danh bạ!")
+        const loadRes = await telegramApi.manageContacts(contactModalAcc.id, 'get', null)
+        if (loadRes?.success) setContactsList(loadRes.contacts || [])
+        setNewContactPhone('')
+        setNewContactFirstName('')
+        setNewContactLastName('')
+      } else {
+        toast.error("Lỗi thêm liên hệ: " + (res?.error || "Lỗi không xác định"))
+      }
+    } catch (e: any) {
+      toast.error("Lỗi thêm liên hệ: " + e.message)
+    } finally {
+      setContactLoading(false)
+    }
+  }
+
+  const handleDeleteContact = async (userId: string) => {
+    if (!contactModalAcc) return
+    setContactLoading(true)
+    try {
+      const res = await telegramApi.manageContacts(contactModalAcc.id, 'delete', { userId })
+      if (res?.success) {
+        toast.success("Đã xóa liên hệ!")
+        const loadRes = await telegramApi.manageContacts(contactModalAcc.id, 'get', null)
+        if (loadRes?.success) setContactsList(loadRes.contacts || [])
+      } else {
+        toast.error("Lỗi xóa liên hệ: " + (res?.error || "Lỗi không xác định"))
+      }
+    } catch (e: any) {
+      toast.error("Lỗi xóa liên hệ: " + e.message)
+    } finally {
+      setContactLoading(false)
     }
   }
 
@@ -367,6 +497,14 @@ export default function AccountsPage() {
               
               <div className="bg-gray-50 p-3 border-t flex justify-end gap-2">
                 <button 
+                  onClick={() => openContactsModal(acc)}
+                  className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-md transition-colors flex items-center gap-1 text-xs"
+                  title="Quản lý danh bạ"
+                >
+                  <BookOpen className="w-4 h-4" />
+                  <span className="text-[10px] font-semibold">Danh bạ</span>
+                </button>
+                <button 
                   onClick={() => openEditModal(acc)}
                   className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-md transition-colors"
                   title="Chỉnh sửa hồ sơ"
@@ -388,33 +526,72 @@ export default function AccountsPage() {
 
       {editingAcc && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 fade-in">
-          <Card className="w-full max-w-md p-6 bg-white shadow-xl relative">
+          <Card className="w-full max-w-lg p-6 bg-white shadow-xl relative max-h-[90vh] overflow-y-auto">
             <button 
               onClick={() => setEditingAcc(null)}
               className="absolute top-4 right-4 text-gray-400 hover:text-gray-700"
             >
               <X className="w-5 h-5" />
             </button>
-            <h2 className="text-xl font-bold text-gray-900 mb-1">Chỉnh sửa Hồ sơ</h2>
-            <p className="text-sm text-gray-500 mb-5">Cập nhật thông tin công khai của tài khoản Telegram.</p>
+            <h2 className="text-xl font-bold text-gray-900 mb-1">Chỉnh sửa Hồ sơ & Cấu hình</h2>
+            <p className="text-sm text-gray-500 mb-5">Cập nhật thông tin công khai và thiết lập bảo mật Telegram.</p>
 
-            <div className="space-y-4">
+            <div className="space-y-5">
+              {/* Profile Photo Upload/Delete */}
+              <div className="border bg-gray-50 p-4 rounded-xl space-y-3">
+                <label className="block text-xs font-semibold text-gray-700 uppercase tracking-wider">Ảnh đại diện (Profile Photo)</label>
+                <div className="flex items-center gap-4">
+                  <TelegramAvatar 
+                    accountId={editingAcc.id} 
+                    title={editFirstName || editingAcc.username} 
+                    className="w-16 h-16 rounded-full text-2xl overflow-hidden shrink-0 border" 
+                  />
+                  <div className="flex flex-col gap-2">
+                    <label className="cursor-pointer bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 shadow-sm">
+                      <Image className="w-3.5 h-3.5" />
+                      Tải ảnh mới lên
+                      <input type="file" accept="image/*" className="hidden" onChange={handlePhotoUpload} />
+                    </label>
+                    <button 
+                      onClick={handlePhotoDelete}
+                      className="border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 shadow-sm bg-white"
+                    >
+                      <Trash className="w-3.5 h-3.5" />
+                      Xóa ảnh đại diện
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Basic Fields */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Tên (First Name)</label>
+                  <input 
+                    value={editFirstName} onChange={e => setEditFirstName(e.target.value)}
+                    className="w-full p-2.5 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none"
+                    placeholder="First name..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Họ (Last Name)</label>
+                  <input 
+                    value={editLastName} onChange={e => setEditLastName(e.target.value)}
+                    className="w-full p-2.5 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none"
+                    placeholder="Last name..."
+                  />
+                </div>
+              </div>
+
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Tên (First Name)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Username (@username)</label>
                 <input 
-                  value={editFirstName} onChange={e => setEditFirstName(e.target.value)}
-                  className="w-full p-2.5 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none"
-                  placeholder="First name..."
+                  value={editUsername} onChange={e => setEditUsername(e.target.value)}
+                  className="w-full p-2.5 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none font-mono"
+                  placeholder="Username..."
                 />
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Họ (Last Name)</label>
-                <input 
-                  value={editLastName} onChange={e => setEditLastName(e.target.value)}
-                  className="w-full p-2.5 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none"
-                  placeholder="Last name..."
-                />
-              </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Tiểu sử (Bio / About)</label>
                 <textarea 
@@ -426,7 +603,40 @@ export default function AccountsPage() {
                 <p className="text-xs text-gray-500 mt-1 text-right">{editAbout.length}/70</p>
               </div>
 
-              <div className="flex justify-end gap-2 pt-2">
+              {/* Privacy Settings */}
+              <div className="border bg-blue-50/30 p-4 rounded-xl space-y-3">
+                <label className="block text-xs font-semibold text-blue-800 uppercase tracking-wider">Cấu hình Quyền riêng tư (Privacy)</label>
+                
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Trạng thái Online</label>
+                    <select 
+                      value={privacyStatus} 
+                      onChange={e => setPrivacyStatus(e.target.value)}
+                      className="w-full p-2 border rounded-lg text-xs bg-white outline-none"
+                    >
+                      <option value="all">Cho phép tất cả (Everybody)</option>
+                      <option value="contacts">Chỉ danh bạ (My Contacts)</option>
+                      <option value="none">Không cho ai (Nobody)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Số điện thoại</label>
+                    <select 
+                      value={privacyPhone} 
+                      onChange={e => setPrivacyPhone(e.target.value)}
+                      className="w-full p-2 border rounded-lg text-xs bg-white outline-none"
+                    >
+                      <option value="all">Cho phép tất cả (Everybody)</option>
+                      <option value="contacts">Chỉ danh bạ (My Contacts)</option>
+                      <option value="none">Không cho ai (Nobody)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t">
                 <button 
                   onClick={() => setEditingAcc(null)}
                   className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
@@ -440,6 +650,86 @@ export default function AccountsPage() {
                   {loading ? 'Đang lưu...' : 'Lưu lại'}
                 </button>
               </div>
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* Contacts Manager Modal */}
+      {contactModalAcc && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 fade-in">
+          <Card className="w-full max-w-2xl p-6 bg-white shadow-xl relative flex flex-col max-h-[85vh]">
+            <button 
+              onClick={() => setContactModalAcc(null)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-gray-700"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <h2 className="text-xl font-bold text-gray-900 mb-1">Danh bạ tài khoản</h2>
+            <p className="text-sm text-gray-500 mb-5">Danh sách bạn bè & liên hệ của tài khoản: <span className="font-semibold text-blue-600">{contactModalAcc.firstName}</span></p>
+
+            {/* Add Contact Form */}
+            <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-4 space-y-3">
+              <h4 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Thêm liên hệ mới</h4>
+              <div className="grid grid-cols-3 gap-3">
+                <input 
+                  value={newContactPhone} onChange={e => setNewContactPhone(e.target.value)}
+                  placeholder="SĐT (+84...)"
+                  className="p-2 border rounded-lg text-xs bg-white outline-none"
+                />
+                <input 
+                  value={newContactFirstName} onChange={e => setNewContactFirstName(e.target.value)}
+                  placeholder="Tên (First Name)"
+                  className="p-2 border rounded-lg text-xs bg-white outline-none"
+                />
+                <input 
+                  value={newContactLastName} onChange={e => setNewContactLastName(e.target.value)}
+                  placeholder="Họ (Last Name - tuỳ chọn)"
+                  className="p-2 border rounded-lg text-xs bg-white outline-none"
+                />
+              </div>
+              <div className="flex justify-end">
+                <button 
+                  onClick={handleAddContact}
+                  disabled={contactLoading || !newContactPhone || !newContactFirstName}
+                  className="bg-blue-600 text-white px-4 py-1.5 rounded-lg text-xs font-medium hover:bg-blue-700 disabled:opacity-50"
+                >
+                  Thêm liên hệ
+                </button>
+              </div>
+            </div>
+
+            {/* Contacts list */}
+            <div className="flex-1 overflow-y-auto border rounded-xl divide-y min-h-[250px]">
+              {contactLoading && contactsList.length === 0 ? (
+                <div className="p-8 text-center text-sm text-gray-500">Đang tải danh bạ...</div>
+              ) : contactsList.length === 0 ? (
+                <div className="p-8 text-center text-sm text-gray-500">Danh bạ trống</div>
+              ) : (
+                contactsList.map((c: any) => (
+                  <div key={c.id} className="p-3 flex items-center justify-between hover:bg-gray-50">
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-sm">
+                        {c.firstName ? c.firstName[0] : '?'}
+                      </div>
+                      <div>
+                        <p className="text-sm font-semibold text-gray-900">{c.firstName} {c.lastName}</p>
+                        <p className="text-xs text-gray-500">
+                          {c.username ? `@${c.username}` : ''} {c.phone ? `| +${c.phone}` : ''}
+                          {c.mutual && <span className="ml-2 text-[10px] text-green-600 font-semibold bg-green-50 px-1.5 py-0.5 rounded border border-green-200">Liên hệ 2 chiều</span>}
+                        </p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => handleDeleteContact(c.id)}
+                      className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                      title="Xóa liên hệ"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </Card>
         </div>

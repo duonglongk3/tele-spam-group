@@ -12,7 +12,8 @@ import {
   ChevronRight,
   Send as SendIcon,
   MessageSquare,
-  Bot
+  Bot,
+  Zap
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useState } from 'react'
@@ -22,7 +23,7 @@ const navItems = [
   { href: '/accounts', label: 'Tài khoản', icon: Users2 },
   { href: '/groups', label: 'Hội nhóm & Kênh', icon: MessageSquare },
   { href: '/autopost', label: 'Chiến dịch Auto Post', icon: Send },
-  { href: '/bot-message-template', label: 'Mẫu tin nhắn Bot', icon: Bot },
+  { href: '/quicksend', label: 'Gửi nhanh & Tương tác', icon: Zap },
   { href: '/logs', label: 'Lịch sử', icon: ClipboardList },
 ]
 

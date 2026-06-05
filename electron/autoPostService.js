@@ -4,6 +4,76 @@ const PostCampaign = require('./models/PostCampaign');
 const { notifyAdmin, getBot } = require('./botService');
 const cron = require('node-cron');
 const { Button } = require('telegram/tl/custom/button');
+const axios = require('axios');
+
+async function rewriteTextWithAI(text, apiKey) {
+  if (!apiKey || !text) return text;
+  try {
+    const response = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Bạn là trợ lý giúp viết lại nội dung bài đăng bán hàng/marketing để tránh bộ lọc spam của mạng xã hội. Hãy viết lại nội dung được cung cấp bằng tiếng Việt sao cho khác đi nhưng giữ nguyên ý nghĩa, giữ nguyên các icon/emoji, và đặc biệt là giữ nguyên các liên kết (URL) và thẻ tag (@username) nếu có. Hãy phản hồi CHỈ bằng nội dung đã viết lại, không thêm lời chào, không thêm phần giải thích hay đóng khung.'
+          },
+          {
+            role: 'user',
+            content: text
+          }
+        ],
+        temperature: 0.8
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+    const result = response.data?.choices?.[0]?.message?.content?.trim();
+    if (result) {
+      console.log(`[AI-Rewrite] Successfully rewrote content.`);
+      return result;
+    }
+  } catch (err) {
+    console.error(`[AI-Rewrite] Error:`, err.response?.data || err.message);
+  }
+  return text;
+}
+
+
+function obfuscateLinks(text) {
+  if (!text) return text;
+  
+  // 1. Convert markdown links: [Label](http://domain.com/path) -> Label (domain[.]com/path)
+  let processed = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (match, label, url) => {
+    const cleanUrl = url.replace(/^https?:\/\/(www\.)?/, '');
+    const obfuscatedUrl = cleanUrl.replace(/\./g, '[.]');
+    return `${label} (${obfuscatedUrl})`;
+  });
+
+  // 2. Convert raw links: https://buffortune.com/products -> buffortune[.]com/products
+  processed = processed.replace(/(https?:\/\/)?(www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,})(\/[^\s]*)?/gi, (match, protocol, www, domain, path) => {
+    // Skip if already has [.] or (dot) or [dot] or space/braces in it
+    if (domain.includes('[') || domain.includes('(') || domain.includes(' ') || domain.includes(']')) {
+      return match;
+    }
+    const formats = [
+      domain.replace(/\./g, '[.]'),
+      domain.replace(/\./g, ' (dot) '),
+      domain.replace(/\./g, '[dot]')
+    ];
+    const obfuscatedDomain = formats[Math.floor(Math.random() * formats.length)];
+    const p = path && path !== '/' ? path : '';
+    return `${obfuscatedDomain}${p}`;
+  });
+
+  return processed;
+}
+
 
 function escapeHtml(text) {
   if (!text) return '';
@@ -112,6 +182,23 @@ function appendActionLinks(text, actionButtons = [], parseMode = 'md') {
     const suffix = parseMode === 'html'
         ? validButtons.map((button) => `<a href="${escapeHtml(button.url)}">${escapeHtml(button.text)}</a>`).join(' | ')
         : validButtons.map((button) => `[${button.text}](${button.url})`).join(' | ');
+
+    return `${text}\n\n${suffix}`;
+}
+
+function appendObfuscatedActionLinks(text, actionButtons = []) {
+    const validButtons = actionButtons
+        .filter((button) => button?.text && button?.url)
+        .slice(0, 2);
+
+    if (validButtons.length === 0) {
+        return text;
+    }
+
+    const suffix = validButtons.map((button) => {
+        const obfuscatedUrl = obfuscateLinks(button.url);
+        return `${button.text}: ${obfuscatedUrl}`;
+    }).join(' | ');
 
     return `${text}\n\n${suffix}`;
 }
@@ -344,6 +431,11 @@ class AutoPostManager {
             const res = await telegramService.withAccount(sourceAccountId, async (client) => {
                 let sentIds = [];
                 const toEntity = await telegramService.resolveEntity(client, target.chatId);
+                
+                // Anti-Spam: simulate reading group history
+                await telegramService.simulateHumanActivity(client, toEntity);
+                await sleep(1000 + Math.random() * 1500);
+
                 const fromEntity = await telegramService.resolveEntity(client, source.fromChatId);
                 const resArray = await client.forwardMessages(toEntity, {
                     messages: source.messageIds,
@@ -373,9 +465,55 @@ class AutoPostManager {
                         for (const message of messages) {
                             if (!message) continue;
 
-                            const text = message.message || '';
+                            let text = message.message || '';
                             const file = getInputFileFromMessage(message);
                             let resMsg;
+
+                            // Apply AI Rewrite if enabled in fallback
+                            if (campaign.useAI) {
+                                try {
+                                    const GlobalSetting = require('./models/Setting');
+                                    const s = await GlobalSetting.findOne({ type: 'global_app_settings' });
+                                    if (s && s.openaiApiKey) {
+                                        console.log(`[AutoPost] Requesting Fallback AI rewrite for campaign: ${campaign.name}`);
+                                        text = await rewriteTextWithAI(text, s.openaiApiKey);
+                                    }
+                                } catch (aiErr) {
+                                    console.error(`[AutoPost] Fallback AI Rewrite error:`, aiErr.message);
+                                }
+                            }
+
+                            // Apply Link Obfuscation in fallback
+                            let shouldObfuscateFallback = !!campaign.obfuscateLinks;
+                            if (!shouldObfuscateFallback && toEntity) {
+                                try {
+                                    let rights = toEntity.defaultBannedRights;
+                                    if (!rights && (toEntity.className === 'Channel' || toEntity.megagroup)) {
+                                        const { Api } = require('telegram/tl');
+                                        const fullChannel = await client.invoke(new Api.channels.GetFullChannel({ channel: toEntity }));
+                                        if (fullChannel && fullChannel.chats && fullChannel.chats.length > 0) {
+                                            rights = fullChannel.chats[0].defaultBannedRights;
+                                        }
+                                    }
+                                    if (rights && (rights.embedLinks || rights.sendInline)) {
+                                        shouldObfuscateFallback = true;
+                                        console.log(`[AutoPost] Forward fallback: target ${target.name} restricts links/inline bots dynamically. Enabling obfuscation.`);
+                                    }
+                                } catch (e) {
+                                    console.error('[AutoPost] Forward fallback dynamic rights check failed:', e.message);
+                                }
+                            }
+
+                            if (shouldObfuscateFallback) {
+                                text = obfuscateLinks(text);
+                            }
+
+                            // Anti-Spam: simulate reading group history
+                            await telegramService.simulateHumanActivity(client, toEntity);
+                            await sleep(1000 + Math.random() * 1000);
+
+                            // Anti-Spam: simulate typing status
+                            await telegramService.simulateTyping(client, toEntity, file ? 'photo' : 'text');
 
                             if (file) {
                                 resMsg = await client.sendFile(toEntity, {
@@ -422,23 +560,88 @@ class AutoPostManager {
     }
 
     async executePost(campaign, target, accountId) {
+        // Find a client to perform dynamic permission check if needed
+        let clientToCheck = null;
+        if (accountId && accountId !== 'bot') {
+            clientToCheck = telegramService.clients.get(accountId);
+        }
+        if (!clientToCheck && telegramService.clients.size > 0) {
+            clientToCheck = telegramService.clients.values().next().value;
+        }
+
+        let shouldObfuscate = !!campaign.obfuscateLinks;
+        if (!shouldObfuscate && clientToCheck) {
+            try {
+                const entity = await telegramService.resolveEntity(clientToCheck, target.chatId);
+                let rights = entity.defaultBannedRights;
+                if (!rights && (entity.className === 'Channel' || entity.megagroup)) {
+                    const { Api } = require('telegram/tl');
+                    const fullChannel = await clientToCheck.invoke(new Api.channels.GetFullChannel({ channel: entity }));
+                    if (fullChannel && fullChannel.chats && fullChannel.chats.length > 0) {
+                        rights = fullChannel.chats[0].defaultBannedRights;
+                    }
+                }
+                if (rights) {
+                    if (rights.embedLinks || rights.sendInline) {
+                        shouldObfuscate = true;
+                        console.log(`[AutoPost] Target ${target.name} restricts links/inline bots dynamically. Enabling obfuscation.`);
+                    }
+                }
+            } catch (err) {
+                console.error(`[AutoPost] Dynamic permission check failed for ${target.name}:`, err.message);
+            }
+        }
+
         let finalMessage = '';
         let currentParseMode = 'md';
         
+        let quote = campaign.quoteText || '';
+        let content = campaign.contentTemplate || '';
+
+        if (shouldObfuscate) {
+            quote = obfuscateLinks(quote);
+            content = obfuscateLinks(content);
+        }
+
         if (campaign.type === 'quote') {
-            const spunQuote = spinContent(campaign.quoteText || '');
-            const spunText = spinContent(campaign.contentTemplate || '');
+            const spunQuote = spinContent(quote);
+            const spunText = spinContent(content);
             // Sử dụng HTML parseMode và thẻ blockquote cho Quote
             finalMessage = `<blockquote>${escapeHtml(spunQuote)}</blockquote>\n${escapeHtml(spunText)}`;
             currentParseMode = 'html';
         } else {
-            finalMessage = spinContent(campaign.contentTemplate);
+            finalMessage = spinContent(content);
         }
-        const messageWithActionLinks = appendActionLinks(finalMessage, campaign.actionButtons, currentParseMode);
-        const messageForDelivery = campaign.sendViaBot ? finalMessage : messageWithActionLinks;
+
+        // Apply AI Rewrite if enabled
+        if (campaign.useAI) {
+            try {
+                const GlobalSetting = require('./models/Setting');
+                const s = await GlobalSetting.findOne({ type: 'global_app_settings' });
+                if (s && s.openaiApiKey) {
+                    console.log(`[AutoPost] Requesting AI rewrite for campaign: ${campaign.name}`);
+                    finalMessage = await rewriteTextWithAI(finalMessage, s.openaiApiKey);
+                } else {
+                    console.warn(`[AutoPost] AI Rewrite is enabled but openaiApiKey is not configured in settings.`);
+                }
+            } catch (aiErr) {
+                console.error(`[AutoPost] AI Rewrite error:`, aiErr.message);
+            }
+        }
+
+        let messageForDelivery = '';
+        let replyMarkup = undefined;
+
+        if (shouldObfuscate) {
+            messageForDelivery = appendObfuscatedActionLinks(finalMessage, campaign.actionButtons);
+            replyMarkup = undefined;
+        } else {
+            const messageWithActionLinks = appendActionLinks(finalMessage, campaign.actionButtons, currentParseMode);
+            messageForDelivery = campaign.sendViaBot ? finalMessage : messageWithActionLinks;
+            replyMarkup = buildReplyMarkup(campaign.actionButtons);
+        }
         
         const logBase = { campaign, accountId, target, action: 'post', contentPreview: messageForDelivery };
-        const replyMarkup = buildReplyMarkup(campaign.actionButtons);
 
         try {
             if (campaign.sendViaBot) {
@@ -477,10 +680,18 @@ class AutoPostManager {
                 let sentIds = [];
                 const entity = await telegramService.resolveEntity(client, target.chatId);
                 
-                if (campaign.imagePaths && campaign.imagePaths.length > 0) {
+                // Anti-Spam: simulate reading group history
+                await telegramService.simulateHumanActivity(client, entity);
+                await sleep(1000 + Math.random() * 1000);
+
+                // Anti-Spam: simulate typing status
+                const isPhoto = campaign.imagePaths && campaign.imagePaths.length > 0;
+                await telegramService.simulateTyping(client, entity, isPhoto ? 'photo' : 'text');
+
+                if (isPhoto) {
                     const resMsg = await client.sendFile(entity, {
                         file: campaign.imagePaths,
-                        caption: messageWithActionLinks,
+                        caption: messageForDelivery,
                         replyTo: target.topicId || undefined,
                         parseMode: currentParseMode,
                         buttons: replyMarkup,
@@ -489,7 +700,7 @@ class AutoPostManager {
                     else if (resMsg && resMsg.id) sentIds.push(resMsg.id);
                 } else {
                     const resMsg = await client.sendMessage(entity, {
-                        message: messageWithActionLinks,
+                        message: messageForDelivery,
                         replyTo: target.topicId || undefined,
                         linkPreview: false,
                         parseMode: currentParseMode,

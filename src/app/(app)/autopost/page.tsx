@@ -32,12 +32,75 @@ interface ActionButtonItem {
   url: string
 }
 
+const AD_TEMPLATES = [
+  {
+    category: 'youtube',
+    categoryName: 'YouTube Channels 📺',
+    items: [
+      {
+        title: 'Template 1: Buy Monetized Channel (Featured)',
+        type: 'photo',
+        content: `{Buy now|Get your hands on|Premium} YouTube Channels {Monetized|Aged & Verified|High-Trust} at Buffortune.com!\n🚀 {Start earning today|Boost your brand|Grow your online presence} with channels in hot niches: {Gaming|Finance|Entertainment|Lifestyle|Tech}.\n\n🛡 {Secure transaction|Trusted escrow|24/7 Support|Fast delivery}.\n👉 Check out the store: https://buffortune.com to pick your perfect channel!`
+      },
+      {
+        title: 'Template 2: Professional YouTuber (Fast)',
+        type: 'text',
+        content: `🎯 {Want to become a professional YouTuber?|Need an active YouTube channel?|Save time starting from scratch?}\n⚡ Buffortune offers {hundreds of|the best} YouTube Channels {eligible for monetization|fully monetized|aged from 2012-2020}.\n\n🛡 {100% Secure delivery|Replacement warranty if issues arise|Automatic & instant transfer}.\n🌐 Sign up & choose your channel: https://buffortune.com`
+      }
+    ]
+  },
+  {
+    category: 'gmail',
+    categoryName: 'Aged Gmail 📧',
+    items: [
+      {
+        title: 'Template 1: Aged Gmail for Ads/Marketing',
+        type: 'photo',
+        content: `📧 {High-Quality|Premium|Aged} Gmail Accounts {registered 2012-2022|with high trust score|perfect for marketing & Ads} available at Buffortune.com!\n✅ Accounts are {fully phone-verified|aged with clean login history|configured with recovery emails}.\n\n⚡ {Instant auto-delivery|Best bulk pricing|Ready to use immediately}.\n👉 Order here: https://buffortune.com`
+      },
+      {
+        title: 'Template 2: Strong & Trusted Profiles',
+        type: 'text',
+        content: `🚀 {Need strong accounts for your campaigns?|Running Facebook/Google Ads?|Creating bulk accounts?}\n🔒 {Get your|Secure} Aged Gmail accounts {trusted by professionals|safest on the market|highest quality} at Buffortune.com.\n\n💎 {Various registration years|Warranty included|24/7 buyer support}.\n🌐 Buy now: https://buffortune.com`
+      }
+    ]
+  },
+  {
+    category: 'sms',
+    categoryName: 'SMS OTP 📲',
+    items: [
+      {
+        title: 'Template 1: Rent Number for Verification',
+        type: 'photo',
+        content: `📲 {Virtual numbers|SMS OTP verification|US Re-number Services} {highly reliable|cheap & fast|professional} at Buffortune.com!\n⚡ {Receive OTP codes instantly|Supports Telegram, Facebook, Gmail, WhatsApp & more|24/7 automated platform}.\n\n🎁 Limited time: Get {20%|special} discount on all SMS/OTP services!\n👉 Try now: https://buffortune.com/sms-services`
+      },
+      {
+        title: 'Template 2: Fresh Numbers with High OTP Rate',
+        type: 'text',
+        content: `🔑 {Need temporary phone numbers for verification?|Creating multiple social accounts?}\n🎯 Get automated SMS OTP verification at {Buffortune|Buffortune.com}.\n\n- {Fresh numbers with high delivery rate|Rates starting from just a few cents|Short-term and long-term options}.\n🌐 Visit: https://buffortune.com/sms-services`
+      }
+    ]
+  },
+  {
+    category: 'general',
+    categoryName: 'Siêu Sale Tổng Hợp 🏆',
+    items: [
+      {
+        title: 'Template 1: World Cup 2026 Promo',
+        type: 'photo',
+        content: `🎉 {Special Promotion|Celebrate} World Cup 2026 - Save up to {30% Off|huge discounts} storewide at Buffortune.com!\n🛒 Best resources for your MMO & Ads campaigns:\n- {Monetized YouTube Channels (Up to 30% Off)}\n- {SMS OTP Verification Services (20% Off)}\n- {High-Trust Aged Gmail accounts}\n\n🛡 {Instant auto-delivery|Trusted escrow|24/7 support}.\n🌐 Register and shop now: https://buffortune.com`
+      }
+    ]
+  }
+];
+
 function AutoPostContent() {
   const searchParams = useSearchParams()
   const [campaigns, setCampaigns] = useState<any[]>([])
   const [accounts, setAccounts] = useState<any[]>([])
   
   const [isEditing, setIsEditing] = useState(false)
+  const [activeTemplateTab, setActiveTemplateTab] = useState('youtube')
   const [editingCampaign, setEditingCampaign] = useState<any>(null)
 
   // Group selection state
@@ -87,6 +150,7 @@ function AutoPostContent() {
     const fromChatId = searchParams.get('fromChatId')
     const fromChatUsername = searchParams.get('fromChatUsername')
     const accId = searchParams.get('acc')
+    const prefilledTargets = searchParams.get('prefilledTargets')
     
     if (isForward && msgId && fromChatId && accId && accounts.length > 0) {
       setEditingCampaign({
@@ -108,10 +172,49 @@ function AutoPostContent() {
         ],
         delayBetweenPosts: "10-20",
         maxPostsPerDay: 3,
-        firstRunMode: 'immediate'
+        firstRunMode: 'immediate',
+        imagePaths: [],
+        useAI: false,
+        obfuscateLinks: false
       })
       setIsEditing(true)
       fetchDialogsForAccounts([accId])
+    } else if (prefilledTargets && accId && accounts.length > 0) {
+      try {
+        const parsed = JSON.parse(prefilledTargets)
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setEditingCampaign({
+            name: `Chiến dịch mới (${parsed.length} nhóm)`,
+            type: 'text',
+            accounts: [accId],
+            targets: parsed.map(t => ({
+              chatId: t.chatId,
+              name: t.name,
+              isChannel: !!t.isChannel,
+              isForum: !!t.isForum,
+              accountId: accId,
+              scheduleType: 'global',
+              customSchedule: ''
+            })),
+            contentTemplate: '',
+            sendViaBot: false,
+            actionButtons: [
+              { text: 'Redirect đến web', url: '' },
+              { text: 'Contact admin', url: '' },
+            ],
+            delayBetweenPosts: "10-20",
+            maxPostsPerDay: 3,
+            firstRunMode: 'immediate',
+            imagePaths: [],
+            useAI: false,
+            obfuscateLinks: false
+          })
+          setIsEditing(true)
+          fetchDialogsForAccounts([accId])
+        }
+      } catch (e) {
+        console.error('Error parsing prefilledTargets:', e)
+      }
     }
   }, [searchParams, accounts.length])
 
@@ -141,7 +244,10 @@ function AutoPostContent() {
       ],
       delayBetweenPosts: "10-20",
       maxPostsPerDay: 3,
-      firstRunMode: 'immediate'
+      firstRunMode: 'immediate',
+      imagePaths: [],
+      useAI: false,
+      obfuscateLinks: false
     })
     setIsEditing(true)
     setDialogs([])
@@ -262,15 +368,6 @@ function AutoPostContent() {
     } else {
       toast.error("Lỗi: " + res?.error)
     }
-  }
-
-  const handleActionButtonChange = (index: number, field: keyof ActionButtonItem, value: string) => {
-    setEditingCampaign((prev: any) => ({
-      ...prev,
-      actionButtons: (prev.actionButtons || []).map((button: ActionButtonItem, buttonIndex: number) =>
-        buttonIndex === index ? { ...button, [field]: value } : button
-      )
-    }))
   }
 
   const handleSendNow = async () => {
@@ -429,6 +526,15 @@ function AutoPostContent() {
       }
   }
 
+  const handleApplyTemplate = (content: string, type: string) => {
+    setEditingCampaign((prev: any) => ({
+      ...prev,
+      contentTemplate: content,
+      type: type
+    }));
+    toast.success("Đã áp dụng mẫu nội dung tiếp thị!");
+  }
+
   // ─── EDITOR VIEW ────────────────────────────────────
   if (isEditing) {
     return (
@@ -456,6 +562,9 @@ function AutoPostContent() {
                 <option value="text">Chữ (Spin Text)</option>
                 <option value="photo">Chữ + Ảnh</option>
                 <option value="quote">Trích dẫn (Quote Block)</option>
+                {(editingCampaign.type === 'forward' || editingCampaign.forwardSource) && (
+                  <option value="forward">Chuyển tiếp (Forward)</option>
+                )}
               </select>
             </div>
 
@@ -594,9 +703,63 @@ function AutoPostContent() {
               ))}
             </div>
 
-            <div className="text-sm text-gray-500 font-medium">
+            <div className="text-sm text-gray-500 font-medium border-b pb-2">
               Đã chọn: {editingCampaign.targets.length} targets
             </div>
+
+            {editingCampaign.targets.length > 0 && (
+              <div className="space-y-2 mt-4">
+                <label className="block text-sm font-semibold text-gray-900">Chi tiết & Lịch trình targets đã chọn</label>
+                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  {editingCampaign.targets.map((t: TargetItem) => {
+                    const key = t.topicId ? `${t.chatId}:${t.topicId}` : t.chatId;
+                    return (
+                      <div key={key} className="bg-gray-50 rounded-xl p-3 border border-gray-200 text-xs flex flex-col gap-2 shadow-sm">
+                        <div className="flex justify-between items-center">
+                          <span className="font-semibold text-gray-800 truncate max-w-[200px]" title={t.name}>
+                            {t.name}{t.topicName ? ` > ${t.topicName}` : ''}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => toggleTarget(t)}
+                            className="text-red-500 hover:text-red-600 font-semibold transition-colors"
+                          >
+                            Bỏ chọn
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[10px] text-gray-500 mb-0.5">Loại Lịch trình</label>
+                            <select
+                              value={t.scheduleType || 'global'}
+                              onChange={e => handleTargetScheduleChange(key, 'scheduleType', e.target.value)}
+                              className="w-full p-1.5 border rounded-lg bg-white text-xs outline-none"
+                            >
+                              <option value="global">Chung (Global)</option>
+                              <option value="random">Random</option>
+                              <option value="fixed">Cố định (Fixed)</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[10px] text-gray-500 mb-0.5">
+                              {t.scheduleType === 'random' ? 'Khoảng cách (Phút)' : t.scheduleType === 'fixed' ? 'Giờ gửi (VD: 09:00,15:00)' : 'Dùng mặc định'}
+                            </label>
+                            <input
+                              type="text"
+                              disabled={t.scheduleType === 'global' || !t.scheduleType}
+                              placeholder={t.scheduleType === 'random' ? 'VD: 10-20 hoặc 30' : t.scheduleType === 'fixed' ? 'VD: 08:30,14:00' : 'Mặc định chiến dịch'}
+                              value={t.customSchedule || ''}
+                              onChange={e => handleTargetScheduleChange(key, 'customSchedule', e.target.value)}
+                              className="w-full p-1.5 border rounded-lg bg-white text-xs disabled:bg-gray-100 disabled:text-gray-400 outline-none"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -661,44 +824,162 @@ function AutoPostContent() {
             </div>
           </div>
         ) : (
-          <div>
-            <label className="block text-sm font-semibold mb-2">Nội dung mẫu (Hỗ trợ Spin Text)</label>
-            <p className="text-xs text-gray-400 mb-2">Dùng cú pháp <code className="bg-gray-100 px-1 rounded">{'{A|B|C}'}</code> để random nội dung.</p>
-            <textarea className="w-full h-36 p-4 border rounded-xl bg-gray-50 text-sm resize-none"
-              value={editingCampaign.contentTemplate}
-              onChange={e => setEditingCampaign({...editingCampaign, contentTemplate: e.target.value})} />
+          <div className="space-y-4">
+            {editingCampaign.type === 'photo' && (
+              <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-900">Danh sách hình ảnh đăng bài</label>
+                    <p className="text-xs text-gray-500">Chọn 1 hoặc nhiều ảnh để đính kèm vào bài viết.</p>
+                  </div>
+                  <button 
+                    type="button"
+                    onClick={async () => {
+                      const res = await telegramApi.selectImage();
+                      if (res?.success && res.filePath) {
+                        const current = editingCampaign.imagePaths || [];
+                        if (!current.includes(res.filePath)) {
+                          setEditingCampaign({
+                            ...editingCampaign,
+                            imagePaths: [...current, res.filePath]
+                          });
+                          toast.success("Đã chọn ảnh thành công!");
+                        } else {
+                          toast.warning("Ảnh này đã có trong danh sách");
+                        }
+                      } else if (res?.error && res.error !== 'Cancelled') {
+                        toast.error("Lỗi chọn ảnh: " + res.error);
+                      }
+                    }}
+                    className="bg-blue-50 text-blue-600 hover:bg-blue-100 px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Thêm ảnh
+                  </button>
+                </div>
+
+                <div className="space-y-2">
+                  {(!editingCampaign.imagePaths || editingCampaign.imagePaths.length === 0) ? (
+                    <div className="border border-dashed border-gray-200 rounded-xl p-6 text-center text-gray-400 text-xs flex flex-col items-center justify-center gap-2">
+                      <ImageIcon className="w-8 h-8 text-gray-300" />
+                      <span>Chưa có ảnh nào được chọn. Hãy bấm nút "Thêm ảnh" để chọn file từ máy tính.</span>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {editingCampaign.imagePaths.map((path: string, index: number) => (
+                        <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl border border-gray-150 text-xs gap-3">
+                          <div className="flex items-center gap-2.5 truncate font-medium text-gray-700">
+                            <div className="p-2 bg-blue-50 text-blue-500 rounded-lg shrink-0">
+                              <ImageIcon className="w-4 h-4" />
+                            </div>
+                            <span className="font-mono truncate" title={path}>{path.split('\\').pop()?.split('/').pop() || path}</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingCampaign({
+                                ...editingCampaign,
+                                imagePaths: editingCampaign.imagePaths.filter((p: string) => p !== path)
+                              });
+                            }}
+                            className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg shrink-0 transition-colors"
+                            title="Xóa ảnh này"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            
+            <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200/60 rounded-xl p-4 mb-4">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-lg">💡</span>
+                <div>
+                  <h4 className="font-bold text-sm text-purple-950">Mẫu Tiếp Thị Tiếng Anh (English Templates)</h4>
+                  <p className="text-[10px] text-purple-700/80">Chọn nhanh mẫu quảng cáo tiếng Anh đã spin để tiếp cận và lôi kéo khách hàng quốc tế.</p>
+                </div>
+              </div>
+              
+              {/* Category tabs */}
+              <div className="flex flex-wrap gap-1.5 mb-3 border-b border-purple-100 pb-2">
+                {AD_TEMPLATES.map(t => (
+                  <button
+                    key={t.category}
+                    type="button"
+                    onClick={() => setActiveTemplateTab(t.category)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                      activeTemplateTab === t.category 
+                        ? 'bg-purple-600 text-white shadow-sm' 
+                        : 'bg-white text-purple-700 hover:bg-purple-100 border border-purple-200/40'
+                    }`}
+                  >
+                    {t.categoryName}
+                  </button>
+                ))}
+              </div>
+
+              {/* Template Items */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-48 overflow-y-auto pr-1">
+                {AD_TEMPLATES.find(t => t.category === activeTemplateTab)?.items.map((item, idx) => (
+                  <div key={idx} className="bg-white border border-purple-100 rounded-lg p-3 hover:border-purple-300 transition-all flex flex-col justify-between shadow-sm">
+                    <div>
+                      <div className="flex justify-between items-center gap-2 mb-1.5">
+                        <span className="font-bold text-xs text-purple-950 truncate">{item.title}</span>
+                        <span className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded-full shrink-0 uppercase ${
+                          item.type === 'photo' ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {item.type === 'photo' ? 'Ảnh + Chữ' : 'Chữ Thuần'}
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-gray-500 line-clamp-3 leading-relaxed mb-2 font-mono bg-gray-50/50 p-1.5 rounded border border-gray-100 whitespace-pre-line">
+                        {item.content}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleApplyTemplate(item.content, item.type)}
+                      className="w-full py-1.5 bg-purple-50 hover:bg-purple-100 active:scale-95 transition-all text-purple-700 font-bold text-[10px] rounded-md border border-purple-200/50 uppercase"
+                    >
+                      Áp dụng mẫu này
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold mb-2">Nội dung mẫu (Hỗ trợ Spin Text)</label>
+              <p className="text-xs text-gray-400 mb-2">Dùng cú pháp <code className="bg-gray-100 px-1 rounded">{'{A|B|C}'}</code> để random nội dung.</p>
+              <textarea className="w-full h-36 p-4 border rounded-xl bg-gray-50 text-sm resize-none"
+                value={editingCampaign.contentTemplate}
+                onChange={e => setEditingCampaign({...editingCampaign, contentTemplate: e.target.value})} />
+            </div>
           </div>
         )}
 
         <div className="space-y-3 pt-2">
-          <label className="flex items-center gap-3 text-sm font-medium">
+          <label className="flex items-center gap-3 text-sm font-medium text-purple-700 cursor-pointer select-none">
             <input
               type="checkbox"
-              checked={!!editingCampaign.sendViaBot}
-              onChange={e => setEditingCampaign({ ...editingCampaign, sendViaBot: e.target.checked })}
+              checked={!!editingCampaign.useAI}
+              onChange={e => setEditingCampaign({ ...editingCampaign, useAI: e.target.checked })}
+              className="w-4 h-4 text-purple-600 focus:ring-purple-500 rounded"
             />
-            Gửi bằng Telegram Bot để hiện inline buttons thật
+            Tự động viết lại nội dung bằng AI (gpt-4o-mini) mỗi lần gửi để tránh bị spam/trùng lặp
           </label>
-          <div>
-            <label className="block text-sm font-semibold mb-1">Nút hành động dưới tin nhắn</label>
-            <p className="text-xs text-gray-500">Điền link cho 2 nút: `Redirect đến web` và `Contact admin`.</p>
-          </div>
-          {(editingCampaign.actionButtons || []).map((button: ActionButtonItem, index: number) => (
-            <div key={index} className="grid gap-3 md:grid-cols-2">
-              <input
-                className="w-full p-3 border rounded-xl bg-gray-50 text-sm"
-                value={button.text}
-                onChange={e => handleActionButtonChange(index, 'text', e.target.value)}
-                placeholder={index === 0 ? 'Redirect đến web' : 'Contact admin'}
-              />
-              <input
-                className="w-full p-3 border rounded-xl bg-gray-50 text-sm"
-                value={button.url}
-                onChange={e => handleActionButtonChange(index, 'url', e.target.value)}
-                placeholder={index === 0 ? 'https://your-site.com' : 'https://t.me/your_admin_username'}
-              />
-            </div>
-          ))}
+
+          <label className="flex items-center gap-3 text-sm font-medium text-blue-700 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={!!editingCampaign.obfuscateLinks}
+              onChange={e => setEditingCampaign({ ...editingCampaign, obfuscateLinks: e.target.checked })}
+              className="w-4 h-4 text-blue-600 focus:ring-blue-500 rounded"
+            />
+            Lách bộ lọc link (Link Obfuscation) - Tự chuyển đổi link thành dạng buffortune[.]com để tránh bị bot xóa tin
+          </label>
         </div>
 
         {/* Bottom Bar */}
@@ -854,9 +1135,18 @@ function AutoPostContent() {
               </div>
             </div>
 
-            <div className="flex gap-4 text-sm text-gray-500">
+            <div className="flex flex-wrap gap-4 text-sm text-gray-500">
               <div><Users className="w-4 h-4 inline mr-1" />{c.accounts?.length || 0} Accounts</div>
               <div><Send className="w-4 h-4 inline mr-1" />{c.targets?.length || 0} Targets</div>
+              {c.type === 'photo' && c.imagePaths?.length > 0 && (
+                <div className="flex items-center gap-1"><ImageIcon className="w-4 h-4" />{c.imagePaths.length} Ảnh</div>
+              )}
+              {c.useAI && (
+                <div className="flex items-center gap-1 text-purple-600 font-semibold"><ShieldCheck className="w-4 h-4" /> AI On</div>
+              )}
+              {c.obfuscateLinks && (
+                <div className="flex items-center gap-1 text-blue-600 font-semibold"><ShieldCheck className="w-4 h-4" /> Anti-Bot Link</div>
+              )}
             </div>
 
             {/* Show selected targets summary if not running */}

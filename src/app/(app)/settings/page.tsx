@@ -19,7 +19,8 @@ export default function SettingsPage() {
     telegramAdminChatId: '',
     telegramWebhookUrl: '',
     telegramPairToken: '',
-    telegramBotUsername: ''
+    telegramBotUsername: '',
+    openaiApiKey: ''
   })
 
   useEffect(() => {
@@ -36,7 +37,8 @@ export default function SettingsPage() {
           telegramAdminChatId: res.settings.telegramAdminChatId || '',
           telegramWebhookUrl: res.settings.telegramWebhookUrl || 'https://d5x1qljf-3000.asse.devtunnels.ms/',
           telegramPairToken: res.settings.telegramPairToken || '',
-          telegramBotUsername: res.settings.telegramBotUsername || ''
+          telegramBotUsername: res.settings.telegramBotUsername || '',
+          openaiApiKey: res.settings.openaiApiKey || ''
         })
       }
     } catch (e: any) {
@@ -230,6 +232,18 @@ export default function SettingsPage() {
             <p className="text-xs text-gray-400 mt-1.5 max-w-2xl leading-relaxed">
               Bot ẩn sẽ chạy ở Port <code>3001</code> bên trong App. Nếu bỏ trống, Bot sẽ dùng **Long Polling** mặc định.
             </p>
+          </div>
+
+          <div className="pt-2">
+            <label className="block text-sm font-semibold mb-1.5">4. OpenAI API Key (GPT-4o-mini)</label>
+            <input
+              type="password"
+              placeholder="sk-proj-..."
+              className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={form.openaiApiKey}
+              onChange={e => setForm({...form, openaiApiKey: e.target.value})}
+            />
+            <p className="text-xs text-gray-400 mt-1">Dùng để tự động viết lại nội dung mỗi lần gửi (tránh trùng lặp spam).</p>
           </div>
         </div>
 
