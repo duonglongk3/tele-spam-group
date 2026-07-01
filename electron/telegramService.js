@@ -1,15 +1,299 @@
+const AI_LEAD_GROUP_BUFFER_BATCH_SIZE = 3;
+const AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS = 60000;
+const AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS = 5000;
+const AI_LEAD_GROUP_MAX_PARALLEL_FLUSHES = 5;
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const { NewMessage } = require('telegram/events');
 const TelegramAccount = require('./models/TelegramAccount');
 
+function getTelegramApiId() {
+    return Number(process.env.TELEGRAM_API_ID || 2040);
+}
+
+function getTelegramApiHash() {
+    return process.env.TELEGRAM_API_HASH || 'b18441a1ff607e10a989891a5462e627';
+}
+
+function getClientOptions(overrides = {}) {
+    return {
+        connectionRetries: 5,
+        deviceModel: process.env.TELEGRAM_DEVICE_MODEL || 'Desktop',
+        systemVersion: process.env.TELEGRAM_SYSTEM_VERSION || 'Windows 10',
+        appVersion: process.env.TELEGRAM_APP_VERSION || 'Telegram Desktop 6.9.3 x64',
+        langCode: process.env.TELEGRAM_LANG_CODE || 'en',
+        systemLangCode: process.env.TELEGRAM_SYSTEM_LANG_CODE || 'en-US',
+        ...overrides,
+    };
+}
+
 class TelegramMultiClient {
     constructor() {
         this.clients = new Map();   // Map<accountId, TelegramClient>
         this.accounts = new Map();  // Map<accountId, info>
+        this.pendingAuth = new Map(); // Map<phone, { client, phoneCodeHash, createdAt }>
+        this.loginCooldowns = new Map(); // Map<phone, retryAt>
+        this.aiLeadPrivateScanTimer = null;
+        this.aiLeadPrivateScanRunning = false;
+        this.privateDebounceTimers = new Map();
+        this.aiLeadGroupBuffers = new Map();
+        this.aiLeadGroupFlushTimers = new Map();
+        this.aiLeadGroupFlushRunning = new Set();
+        this.aiLeadGroupFairFlushTimer = null;
+        this.aiLeadGroupFairFlushDueAt = 0;
+        this.aiLeadGroupLastFlushAt = new Map();
     }
 
+    getLoginCooldown(phone) {
+        const retryAt = this.loginCooldowns.get(phone) || 0;
+        if (retryAt <= Date.now()) {
+            this.loginCooldowns.delete(phone);
+            return 0;
+        }
+        return retryAt;
+    }
+
+    rememberLoginCooldown(phone, err) {
+        const msg = err?.message || String(err || '');
+        const flood = msg.match(/(?:FLOOD_WAIT|PHONE_NUMBER_FLOOD|PHONE_PASSWORD_FLOOD)_(\d+)?/);
+        if (!flood && !msg.includes('PHONE_NUMBER_FLOOD') && !msg.includes('PHONE_PASSWORD_FLOOD')) return;
+        const seconds = Number(flood?.[1]) || 300;
+        this.loginCooldowns.set(phone, Date.now() + Math.max(seconds, 60) * 1000);
+    }
+
+    async cleanupPendingAuth(phone) {
+        const pending = this.pendingAuth.get(phone);
+        this.pendingAuth.delete(phone);
+        if (pending?.client) {
+            try { await pending.client.disconnect(); } catch (_) {}
+        }
+    }
+
+    registerIncomingHandlers(client, accountId, me) {
+        client.addEventHandler(async (event) => {
+            try {
+                const msg = event.message;
+                if (!msg || msg.out) return;
+
+                const isPrivate = msg.isPrivate || msg.peerId?.userId;
+
+                if (isPrivate) {
+                    const privateChatId = msg.peerId?.userId?.toString?.() || msg.senderId?.toString?.() || msg.sender?.id?.toString?.() || msg.chatId?.toString?.() || '';
+                    if (!privateChatId) {
+                        console.log('[AILead] Realtime private message ignored. Reason: missing_private_chat_id', { accountId, messageId: msg.id });
+                    } else {
+                        const debounceKey = `${accountId}:${privateChatId}`;
+                        const existingTimer = this.privateDebounceTimers.get(debounceKey);
+                        if (existingTimer) clearTimeout(existingTimer);
+                        const timer = setTimeout(() => {
+                            this.privateDebounceTimers.delete(debounceKey);
+                            this.processPrivateConversation({ accountId, client, chatId: privateChatId })
+                                .catch((err) => console.error(`[AILead] Realtime private debounce ${privateChatId} error:`, err.message));
+                        }, 60000);
+                        this.privateDebounceTimers.set(debounceKey, timer);
+                        console.log('[AILead] Realtime private message debounced:', { accountId, chatId: privateChatId, messageId: msg.id, waitMs: 60000 });
+                    }
+                } else {
+                    this.enqueueAiLeadGroupMessage({ accountId, client, message: msg });
+                }
+
+                if (msg.mentioned) {
+                    const text = msg.message || '[Có đính kèm file/ảnh]';
+                    const senderName = msg.sender ? (msg.sender.firstName || msg.sender.username || 'Ai đó') : 'Khách';
+                    let groupName = 'Nhóm/Chat Cá Nhân';
+                    if (msg.chat && msg.chat.title) groupName = msg.chat.title;
+
+                    let messageLink = '';
+                    if (msg.chat && msg.chat.username) {
+                        messageLink = `\n👉 Link tin nhắn: https://t.me/${msg.chat.username}/${msg.id}`;
+                    } else if (msg.chatId) {
+                        let cleanId = msg.chatId.toString().replace('-100', '');
+                        messageLink = `\n👉 Link (Private): https://t.me/c/${cleanId}/${msg.id}`;
+                    }
+
+                    const alertText = `🚨 Có khách Hú/Reply kìa sếp!\n\n👤 Từ: ${senderName}\n🏢 Group: ${groupName}\n💬 Trạm gửi: ${me.firstName}\n\n📝 Bình luận: "${text}"${messageLink}`;
+
+                    const botService = require('./botService');
+                    botService.notifyAdmin(alertText, null);
+                }
+            } catch(e) { console.error('Inbox Monitor Error:', e); }
+        }, new NewMessage({ incoming: true }));
+    }
+
+    getAiLeadGroupBufferKey(accountId, message) {
+        const chatId = message?.chatId?.toString?.() || message?.peerId?.channelId?.toString?.() || message?.peerId?.chatId?.toString?.() || '';
+        return `${accountId}:${chatId || 'unknown'}`;
+    }
+
+    getAiLeadGroupBufferOrder(bufferKey, settings) {
+        const [accountId, ...chatParts] = String(bufferKey || '').split(':');
+        const chatId = chatParts.join(':');
+        const normalize = (value) => String(value || '').replace(/^-100/, '');
+        const groups = Array.isArray(settings?.aiLeadEngagementGroups) ? settings.aiLeadEngagementGroups : [];
+        const idx = groups.findIndex((group) =>
+            String(group.accountId) === String(accountId) && normalize(group.chatId) === normalize(chatId)
+        );
+        return idx >= 0 ? idx : Number.MAX_SAFE_INTEGER;
+    }
+
+    takeAiLeadGroupBufferItems(bufferKey) {
+        const buffer = this.aiLeadGroupBuffers.get(bufferKey) || [];
+        const items = buffer.splice(0, AI_LEAD_GROUP_BUFFER_BATCH_SIZE);
+        if (buffer.length > 0) this.aiLeadGroupBuffers.set(bufferKey, buffer);
+        else this.aiLeadGroupBuffers.delete(bufferKey);
+        return { items, remaining: buffer.length };
+    }
+
+    enqueueAiLeadGroupMessage({ accountId, client, message }) {
+        if (!message || message.out) return;
+        const bufferKey = this.getAiLeadGroupBufferKey(accountId, message);
+        const buffer = this.aiLeadGroupBuffers.get(bufferKey) || [];
+        buffer.push({ accountId, client, message, queuedAt: Date.now() });
+        this.aiLeadGroupBuffers.set(bufferKey, buffer);
+        const chat = message.chat || {};
+        const sender = message.sender || {};
+        const text = (message.message || message.text || '').trim();
+        console.log('[AILead] Group message buffered:', {
+            accountId,
+            chatId: message.chatId?.toString?.() || '',
+            chatTitle: chat.title || chat.firstName || chat.username || '',
+            chatUsername: chat.username ? `@${chat.username}` : '',
+            messageId: message.id,
+            senderId: message.senderId?.toString?.() || sender.id?.toString?.() || '',
+            senderName: [sender.firstName, sender.lastName].filter(Boolean).join(' ') || sender.title || sender.username || '',
+            senderUsername: sender.username ? `@${sender.username}` : '',
+            text: text.slice(0, 300),
+            buffered: buffer.length,
+            bufferKey,
+        });
+
+        this.scheduleAiLeadGroupFairFlush(
+            buffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
+                ? 'count_batch_limit'
+                : 'timer_60s',
+            buffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
+                ? AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS
+                : AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS,
+        );
+    }
+
+    scheduleAiLeadGroupFairFlush(reason = 'timer_60s', delayMs = AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS) {
+        const dueAt = Date.now() + Math.max(0, delayMs);
+        if (this.aiLeadGroupFairFlushTimer) {
+            if (this.aiLeadGroupFairFlushDueAt && this.aiLeadGroupFairFlushDueAt <= dueAt) return;
+            clearTimeout(this.aiLeadGroupFairFlushTimer);
+            this.aiLeadGroupFairFlushTimer = null;
+        }
+        this.aiLeadGroupFairFlushDueAt = dueAt;
+        this.aiLeadGroupFairFlushTimer = setTimeout(() => {
+            this.aiLeadGroupFairFlushTimer = null;
+            this.aiLeadGroupFairFlushDueAt = 0;
+            this.flushAiLeadGroupBuffersFair(reason).catch((err) => {
+                console.error('[AILead] Group buffer fair flush error:', err.message);
+            });
+        }, Math.max(0, delayMs));
+    }
+
+    async flushAiLeadGroupBuffersFair(reason = 'timer_60s') {
+        const settings = await require('./models/Setting').findOne({ type: 'global_app_settings' }).catch(() => null);
+        const keys = Array.from(this.aiLeadGroupBuffers.keys())
+            .filter((key) => {
+                const buffer = this.aiLeadGroupBuffers.get(key) || [];
+                return buffer.length > 0 && !this.aiLeadGroupFlushRunning.has(key);
+            })
+            .sort((a, b) => {
+                const orderDiff = this.getAiLeadGroupBufferOrder(a, settings) - this.getAiLeadGroupBufferOrder(b, settings);
+                if (orderDiff !== 0) return orderDiff;
+                return (this.aiLeadGroupLastFlushAt.get(a) || 0) - (this.aiLeadGroupLastFlushAt.get(b) || 0);
+            });
+
+        if (!keys.length) return { success: true, reason, groups: 0, results: [] };
+
+        const selected = [];
+        for (const key of keys) {
+            this.aiLeadGroupFlushRunning.add(key);
+            const { items, remaining } = this.takeAiLeadGroupBufferItems(key);
+            if (items.length) {
+                selected.push({ key, items, remaining });
+            } else {
+                this.aiLeadGroupFlushRunning.delete(key);
+            }
+        }
+
+        const mergedItems = selected.flatMap((entry) => entry.items);
+        if (!mergedItems.length) return { success: true, reason, groups: 0, results: [] };
+
+        try {
+            const aiLeadService = require('./aiLeadService');
+            console.log('[AILead] Fair flushing group buffers:', {
+                reason,
+                groups: selected.length,
+                items: mergedItems.length,
+                groupItems: selected.map((entry) => ({ bufferKey: entry.key, items: entry.items.length, remaining: entry.remaining })),
+            });
+            const result = await aiLeadService.processBufferedGroupMessages({ items: mergedItems, reason: `${reason}_fair_merged` });
+            console.log('[AILead] Fair group buffers flushed:', JSON.stringify({ groups: selected.length, ...result }, null, 2));
+            const now = Date.now();
+            for (const entry of selected) this.aiLeadGroupLastFlushAt.set(entry.key, now);
+            return { success: true, reason, groups: selected.length, results: [result] };
+        } finally {
+            for (const entry of selected) this.aiLeadGroupFlushRunning.delete(entry.key);
+            const remainingKeys = Array.from(this.aiLeadGroupBuffers.keys()).filter((key) => {
+                const buffer = this.aiLeadGroupBuffers.get(key) || [];
+                return buffer.length > 0;
+            });
+            if (remainingKeys.length > 0) {
+                const hasFullBuffer = remainingKeys.some((key) => (this.aiLeadGroupBuffers.get(key) || []).length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE);
+                this.scheduleAiLeadGroupFairFlush(
+                    hasFullBuffer ? 'fair_followup_batch_limit' : 'fair_followup_timer',
+                    hasFullBuffer ? AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS : AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS,
+                );
+            }
+        }
+    }
+
+    async flushAiLeadGroupBuffer(reason = 'manual', bufferKey = '') {
+        if (!bufferKey) {
+            return this.flushAiLeadGroupBuffersFair(reason);
+        }
+
+        if (this.aiLeadGroupFlushRunning.has(bufferKey)) return { success: false, reason: 'already_running', bufferKey };
+        const timer = this.aiLeadGroupFlushTimers.get(bufferKey);
+        if (timer) {
+            clearTimeout(timer);
+            this.aiLeadGroupFlushTimers.delete(bufferKey);
+        }
+
+        const buffer = this.aiLeadGroupBuffers.get(bufferKey) || [];
+        const items = buffer.splice(0, AI_LEAD_GROUP_BUFFER_BATCH_SIZE);
+        if (buffer.length > 0) this.aiLeadGroupBuffers.set(bufferKey, buffer);
+        else this.aiLeadGroupBuffers.delete(bufferKey);
+        if (!items.length) return { success: true, reason: 'empty', bufferKey };
+
+        this.aiLeadGroupFlushRunning.add(bufferKey);
+        try {
+            const aiLeadService = require('./aiLeadService');
+            console.log('[AILead] Flushing group buffer:', { reason, bufferKey, items: items.length, remaining: buffer.length });
+            const result = await aiLeadService.processBufferedGroupMessages({ items, reason });
+            console.log('[AILead] Group buffer flushed:', JSON.stringify({ bufferKey, ...result }, null, 2));
+            this.aiLeadGroupLastFlushAt.set(bufferKey, Date.now());
+            return result;
+        } finally {
+            this.aiLeadGroupFlushRunning.delete(bufferKey);
+            const nextBuffer = this.aiLeadGroupBuffers.get(bufferKey) || [];
+            if (nextBuffer.length > 0) {
+                this.scheduleAiLeadGroupFairFlush(
+                    nextBuffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
+                        ? 'count_batch_limit_followup'
+                        : 'timer_60s_followup',
+                    nextBuffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
+                        ? AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS
+                        : AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS,
+                );
+            }
+        }
+    }
     async checkSelfBannedInChannel(client, chatId) {
         try {
             const channel = await this.resolveEntity(client, chatId);
@@ -35,24 +319,10 @@ class TelegramMultiClient {
     async simulateHumanActivity(client, peer) {
         try {
             const entity = await this.resolveEntity(client, peer);
-            // Simulate reading chat history
-            const messages = await client.getMessages(entity, { limit: 5 });
-            if (messages && messages.length > 0) {
-                if (entity.className === 'Channel') {
-                    await client.invoke(new Api.channels.ReadHistory({
-                        channel: entity,
-                        maxId: messages[0].id
-                    }));
-                } else if (entity.className === 'Chat' || entity.className === 'User') {
-                    await client.invoke(new Api.messages.ReadHistory({
-                        peer: entity,
-                        maxId: messages[0].id
-                    }));
-                }
-            }
-            console.log(`[Anti-Spam] Simulated human activity (read history) for peer: ${peer}`);
+            await client.getMessages(entity, { limit: 3 });
+            console.log(`[AccountSafety] Warmed entity cache for peer: ${peer}`);
         } catch (e) {
-            console.log(`[Anti-Spam] simulateHumanActivity log (non-fatal): ${e.message}`);
+            console.log(`[AccountSafety] warm entity log (non-fatal): ${e.message}`);
         }
     }
 
@@ -120,8 +390,6 @@ class TelegramMultiClient {
             for (const accDoc of savedAccounts) {
                 const acc = {
                     id: accDoc.accountId,
-                    apiId: accDoc.apiId,
-                    apiHash: accDoc.apiHash,
                     sessionString: accDoc.sessionString,
                     firstName: accDoc.firstName,
                     lastName: accDoc.lastName,
@@ -133,6 +401,7 @@ class TelegramMultiClient {
                 this.accounts.set(acc.id, acc);
                 this.connectAccount(acc).catch(console.error);
             }
+            this.startAiLeadPrivateInboxWatcher().catch((err) => console.error('[AILead] Watcher start error:', err.message));
         } catch(err) {
             console.error('[TelegramService] DB Init error:', err);
         }
@@ -140,9 +409,7 @@ class TelegramMultiClient {
 
     async connectAccount(account) {
         const session = new StringSession(account.sessionString);
-        const client = new TelegramClient(session, Number(account.apiId), account.apiHash, {
-            connectionRetries: 5,
-        });
+        const client = new TelegramClient(session, getTelegramApiId(), getTelegramApiHash(), getClientOptions());
         client.setLogLevel('none'); // KHÔNG IN LOG RÁC CỦA GRAMJS RA CONSOLE
 
         try {
@@ -150,32 +417,7 @@ class TelegramMultiClient {
             const me = await client.getMe();
             this.clients.set(account.id, client);
 
-            // --- Inbox Monitor (Reply Catcher) ---
-            client.addEventHandler(async (event) => {
-                try {
-                    const msg = event.message;
-                    if (msg && msg.mentioned && !msg.out) {
-                        const text = msg.message || '[Có đính kèm file/ảnh]';
-                        const senderName = msg.sender ? (msg.sender.firstName || msg.sender.username || 'Ai đó') : 'Khách';
-                        let groupName = 'Nhóm/Chat Cá Nhân';
-                        if (msg.chat && msg.chat.title) groupName = msg.chat.title;
-                        
-                        let messageLink = '';
-                        if (msg.chat && msg.chat.username) {
-                            messageLink = `\n👉 Link tin nhắn: https://t.me/${msg.chat.username}/${msg.id}`;
-                        } else if (msg.chatId) {
-                            let cleanId = msg.chatId.toString().replace('-100', '');
-                            messageLink = `\n👉 Link (Private): https://t.me/c/${cleanId}/${msg.id}`;
-                        }
-
-                        const alertText = `🚨 Có khách Hú/Reply kìa sếp!\n\n👤 Từ: ${senderName}\n🏢 Group: ${groupName}\n💬 Trạm gửi: ${me.firstName}\n\n📝 Bình luận: "${text}"${messageLink}`;
-                        
-                        const botService = require('./botService');
-                        botService.notifyAdmin(alertText, null);
-                    }
-                } catch(e) { console.error('Inbox Monitor Error:', e); }
-            }, new NewMessage({ incoming: true }));
-            // ------------------------------------
+            this.registerIncomingHandlers(client, account.id, me);
             
             let about = '';
             try {
@@ -185,8 +427,6 @@ class TelegramMultiClient {
 
             const accInfo = {
                 id: account.id,
-                apiId: account.apiId,
-                apiHash: account.apiHash,
                 sessionString: account.sessionString,
                 firstName: me.firstName,
                 lastName: me.lastName,
@@ -204,6 +444,14 @@ class TelegramMultiClient {
                 console.log(`[Telegram] Entity cache populated for ${me.firstName}`);
             }).catch(() => {});
 
+            setTimeout(() => {
+                this.scanUnreadPrivateMessages({ accountIds: [account.id], dialogLimit: 100, messageLimit: 5, source: 'startup' })
+                    .then((res) => {
+                        if (res?.scanned || res?.queued || res?.sent) console.log('[AILead] Startup private unread scan:', res);
+                    })
+                    .catch((err) => console.error('[AILead] Startup private unread scan error:', err.message));
+            }, 5000);
+
             return accInfo;
         } catch (err) {
             console.error(`[Telegram] Failed to connect ${account.id}:`, err.message);
@@ -219,8 +467,6 @@ class TelegramMultiClient {
                 await TelegramAccount.findOneAndUpdate(
                     { accountId: account.id },
                     {
-                        apiId: account.apiId,
-                        apiHash: account.apiHash,
                         sessionString: account.sessionString,
                         firstName: account.firstName,
                         lastName: account.lastName,
@@ -241,88 +487,83 @@ class TelegramMultiClient {
     }
 
     // ─── LOGIN: OTP Flow ───────────────────────────────
-    async requestLoginCode(apiId, apiHash, phone) {
+    async requestLoginCode(phone) {
+        const retryAt = this.getLoginCooldown(phone);
+        if (retryAt) {
+            return {
+                success: false,
+                error: `LOGIN_COOLDOWN:${Math.ceil((retryAt - Date.now()) / 1000)}`,
+            };
+        }
+
+        await this.cleanupPendingAuth(phone);
+
         const session = new StringSession('');
-        const client = new TelegramClient(session, Number(apiId), apiHash, { connectionRetries: 2 });
+        const client = new TelegramClient(session, getTelegramApiId(), getTelegramApiHash(), getClientOptions({ connectionRetries: 3 }));
         client.setLogLevel('none');
 
         try {
             await client.connect();
-            const result = await client.sendCode({ apiId: Number(apiId), apiHash }, phone);
-            this._tempAuthClient = client;
-            this._tempAuthPhone = phone;
-            this._tempAuthPhoneCodeHash = result.phoneCodeHash;
-            this._tempApiId = apiId;
-            this._tempApiHash = apiHash;
-            return { success: true, phoneCodeHash: result.phoneCodeHash };
+            const res = await client.sendCode(
+                { apiId: getTelegramApiId(), apiHash: getTelegramApiHash() },
+                phone
+            );
+            this.pendingAuth.set(phone, {
+                client,
+                phoneCodeHash: res.phoneCodeHash,
+                createdAt: Date.now(),
+            });
+            return { success: true, phoneCodeHash: res.phoneCodeHash };
         } catch (err) {
-            await client.disconnect();
+            this.rememberLoginCooldown(phone, err);
+            try { await client.disconnect(); } catch (_) {}
             return { success: false, error: err.message };
         }
     }
 
-    async submitLoginCode(code, password = '') {
-        try {
-            const client = this._tempAuthClient;
-            if (!client) throw new Error("No pending auth");
+    async submitLoginCode(phone, code, phoneCodeHash, password = '') {
+        const retryAt = this.getLoginCooldown(phone);
+        if (retryAt) {
+            return {
+                success: false,
+                error: `LOGIN_COOLDOWN:${Math.ceil((retryAt - Date.now()) / 1000)}`,
+            };
+        }
 
+        let pending = this.pendingAuth.get(phone);
+        if (!pending || pending.phoneCodeHash !== phoneCodeHash || Date.now() - pending.createdAt > 10 * 60 * 1000) {
+            return { success: false, error: 'AUTH_SESSION_EXPIRED' };
+        }
+
+        const client = pending.client;
+        try {
             if (password) {
                 const { computeCheck } = require('telegram/Password');
                 const passwordParams = await client.invoke(new Api.account.GetPassword());
                 const checkPwd = await computeCheck(passwordParams, password);
                 await client.invoke(new Api.auth.CheckPassword({ password: checkPwd }));
             } else {
-                await client.invoke(new Api.auth.SignIn({
-                    phoneNumber: this._tempAuthPhone,
-                    phoneCodeHash: this._tempAuthPhoneCodeHash,
-                    phoneCode: code
-                })).catch((err) => {
-                    if (err.message.includes('SESSION_PASSWORD_NEEDED')) {
-                        throw new Error('SESSION_PASSWORD_NEEDED');
+                try {
+                    await client.invoke(new Api.auth.SignIn({
+                        phoneNumber: phone,
+                        phoneCodeHash,
+                        phoneCode: code,
+                    }));
+                } catch (err) {
+                    if ((err.message || '').includes('SESSION_PASSWORD_NEEDED')) {
+                        return { success: false, error: 'SESSION_PASSWORD_NEEDED' };
                     }
                     throw err;
-                });
+                }
             }
 
             const me = await client.getMe();
-            const sessionString = client.session.save();
             const accountId = me.id.toString();
+            const sessionString = client.session.save();
 
             if (this.clients.has(accountId)) {
                 try { await this.clients.get(accountId).disconnect(); } catch (_) {}
             }
-
-            // --- Inbox Monitor (Reply Catcher) ---
-            client.addEventHandler(async (event) => {
-                try {
-                    const msg = event.message;
-                    // mentioned == bị tag tên HOẶC có người bấm vào nút Reply nhắn tin của Acc
-                    if (msg && msg.mentioned && !msg.out) {
-                        const text = msg.message || '[Có đính kèm file/ảnh]';
-                        const senderName = msg.sender ? (msg.sender.firstName || msg.sender.username || 'Ai đó') : 'Khách';
-                        let groupName = 'Nhóm/Chat Cá Nhân';
-                        if (msg.chat && msg.chat.title) groupName = msg.chat.title;
-                        
-                        // Lấy Link nếu là group public
-                        let messageLink = '';
-                        if (msg.chat && msg.chat.username) {
-                            messageLink = `\n👉 Link tin nhắn: https://t.me/${msg.chat.username}/${msg.id}`;
-                        } else if (msg.chatId) {
-                            // Extract raw id to create a possible fallback link
-                            let cleanId = msg.chatId.toString().replace('-100', '');
-                            messageLink = `\n👉 Link (Private): https://t.me/c/${cleanId}/${msg.id}`;
-                        }
-
-                        const alertText = `🚨 **Có khách Hú/Reply kìa sếp!**\n\n👤 Từ: ${senderName}\n🏢 Group: ${groupName}\n💬 Trạm gửi: ${me.firstName}\n\n📝 Bình luận: "${text}"${messageLink}`;
-                        
-                        const botService = require('./botService');
-                        botService.notifyAdmin(alertText);
-                    }
-                } catch(e) {
-                    console.error('Inbox Monitor Error:', e);
-                }
-            }, new NewMessage({ incoming: true }));
-            // ------------------------------------
 
             let about = '';
             try {
@@ -332,19 +573,27 @@ class TelegramMultiClient {
 
             this.clients.set(accountId, client);
             this.accounts.set(accountId, {
-                id: accountId, apiId: this._tempApiId, apiHash: this._tempApiHash,
-                sessionString, firstName: me.firstName, lastName: me.lastName,
-                username: me.username, phone: me.phone, about, connected: true,
+                id: accountId,
+                sessionString,
+                firstName: me.firstName,
+                lastName: me.lastName,
+                username: me.username,
+                phone: me.phone,
+                about,
+                connected: true,
             });
-            this._saveAccounts();
+            this.registerIncomingHandlers(client, accountId, me);
+            this.pendingAuth.delete(phone);
+            await this._saveAccounts();
             return { success: true, account: this.accounts.get(accountId) };
         } catch (err) {
+            this.rememberLoginCooldown(phone, err);
             return { success: false, error: err.message };
         }
     }
 
     // ─── LOGIN: Import Session String ──────────────────
-    async importSession(apiId, apiHash, sessionString) {
+    async importSession(sessionString) {
         let session;
         try {
             session = new StringSession(sessionString);
@@ -353,7 +602,7 @@ class TelegramMultiClient {
         }
         
         // Giảm retry xuống 1 để fail nhanh nếu session rác
-        const client = new TelegramClient(session, Number(apiId), apiHash, { connectionRetries: 1 });
+        const client = new TelegramClient(session, getTelegramApiId(), getTelegramApiHash(), getClientOptions({ connectionRetries: 1 }));
         client.setLogLevel('none'); // Tắt log rác hiển thị ra terminal
 
         try {
@@ -373,10 +622,11 @@ class TelegramMultiClient {
 
             this.clients.set(accountId, client);
             this.accounts.set(accountId, {
-                id: accountId, apiId, apiHash, sessionString,
+                id: accountId, sessionString,
                 firstName: me.firstName, lastName: me.lastName,
                 username: me.username, phone: me.phone, about, connected: true,
             });
+            this.registerIncomingHandlers(client, accountId, me);
             this._saveAccounts();
             return { success: true, account: this.accounts.get(accountId) };
         } catch (err) {
@@ -386,8 +636,31 @@ class TelegramMultiClient {
     }
 
     async removeAccount(accountId) {
-        if (this.clients.has(accountId)) {
-            try { await this.clients.get(accountId).disconnect(); } catch (_) {}
+        let client = this.clients.get(accountId);
+        let tempClient = null;
+
+        if (!client) {
+            const account = this.accounts.get(accountId) || await TelegramAccount.findOne({ accountId });
+            if (account?.sessionString) {
+                try {
+                    const session = new StringSession(account.sessionString);
+                    tempClient = new TelegramClient(session, getTelegramApiId(), getTelegramApiHash(), getClientOptions({ connectionRetries: 1 }));
+                    tempClient.setLogLevel('none');
+                    await tempClient.connect();
+                    client = tempClient;
+                } catch (err) {
+                    console.warn(`[Telegram] Could not reconnect ${accountId} before logout:`, err.message);
+                }
+            }
+        }
+
+        if (client) {
+            try {
+                await client.invoke(new Api.auth.LogOut());
+            } catch (err) {
+                console.warn(`[Telegram] Logout failed for ${accountId}:`, err.message);
+            }
+            try { await client.disconnect(); } catch (_) {}
             this.clients.delete(accountId);
         }
         this.accounts.delete(accountId);
@@ -396,7 +669,7 @@ class TelegramMultiClient {
         } catch (err) {
             console.error(err);
         }
-        return { success: true };
+        return { success: true, loggedOut: !!client };
     }
 
     async withAccount(accountId, action) {
@@ -498,6 +771,284 @@ class TelegramMultiClient {
         });
     }
 
+    async writeAiLeadScanLog(summary, source = 'manual') {
+        try {
+            const PostLog = require('./models/PostLog');
+            await PostLog.create({
+                campaignId: 'ai-lead',
+                campaignName: 'AI Lead',
+                accountId: summary.accountIds?.join(', ') || '',
+                accountName: `${summary.accounts || 0} connected account(s)`,
+                targetName: 'Private inbox',
+                action: `ai_lead_inbox_scan:${source}`,
+                status: summary.success ? 'success' : 'fail',
+                contentPreview: `dialogs=${summary.dialogs || 0}, scanned=${summary.scanned || 0}, queued=${summary.queued || 0}, sent=${summary.sent || 0}, ignored=${summary.ignored || 0}${summary.ignoredReasons ? ', reasons=' + JSON.stringify(summary.ignoredReasons) : ''}`,
+                errorMessage: Array.isArray(summary.errors) && summary.errors.length ? summary.errors.map((err) => err.error || String(err)).join('; ') : '',
+            });
+        } catch (err) {
+            console.error('[AILead] Failed to write scan log:', err.message);
+        }
+    }
+
+    async startAiLeadPrivateInboxWatcher(intervalMs = 60000) {
+        const settings = await require('./models/Setting').findOne({ type: 'global_app_settings' });
+        if (settings?.aiLeadUserReplyEnabled === false) {
+            this.stopAiLeadPrivateInboxWatcher();
+            console.log('[AILead] Private inbox watcher disabled: user reply is off');
+            return { success: false, running: false, reason: 'AI user reply is disabled' };
+        }
+        if (!settings?.openaiApiKey) {
+            this.stopAiLeadPrivateInboxWatcher();
+            console.log('[AILead] Private inbox watcher disabled: missing AI API key');
+            return { success: false, running: false, reason: 'Missing AI API key' };
+        }
+
+        if (this.aiLeadPrivateScanTimer) {
+            return { success: true, running: true, reason: 'already_running' };
+        }
+
+        this.aiLeadPrivateScanTimer = setInterval(() => {
+            if (this.aiLeadPrivateScanRunning) return;
+            this.aiLeadPrivateScanRunning = true;
+            this.scanUnreadPrivateMessages({ dialogLimit: 100, messageLimit: 5, source: 'background', writeLog: false })
+                .then((res) => {
+                    if (res?.scanned || res?.queued || res?.sent || res?.errors?.length) {
+                        console.log('[AILead] Background private unread scan:', res);
+                        return this.writeAiLeadScanLog(res, 'background');
+                    }
+                    return null;
+                })
+                .catch((err) => console.error('[AILead] Background private unread scan error:', err.message))
+                .finally(() => { this.aiLeadPrivateScanRunning = false; });
+        }, intervalMs);
+
+        console.log(`[AILead] Private inbox watcher started, interval ${intervalMs}ms`);
+        return { success: true, running: true };
+    }
+
+    stopAiLeadPrivateInboxWatcher() {
+        if (this.aiLeadPrivateScanTimer) clearInterval(this.aiLeadPrivateScanTimer);
+        this.aiLeadPrivateScanTimer = null;
+        return { success: true, running: false };
+    }
+
+    async processPrivateConversation({ accountId, client, chatId }) {
+        const aiLeadService = require('./aiLeadService');
+        try {
+            const entity = await this.resolveEntity(client, chatId);
+            if (!entity) return;
+
+            const dialogs = await client.getDialogs({ limit: 50 });
+            const dialog = dialogs.find(d => d.entity && String(d.entity.id) === String(chatId));
+            const unreadCount = dialog ? Number(dialog.unreadCount || dialog.unread_count || 0) : 1;
+            
+            const unreadLimit = Math.max(1, Math.min(unreadCount || 1, 20));
+            const limit = Math.max(unreadLimit, 20);
+            const messages = await client.getMessages(entity, { limit });
+            
+            const chronologicalMessages = messages.slice().reverse();
+            const recentPrivateContext = chronologicalMessages
+                .filter(msg => msg && (msg.message || msg.text || '').trim())
+                .slice(-20)
+                .map(msg => `${msg.out ? 'TeleShopBot.Com' : 'Customer'}: ${(msg.message || msg.text || '').trim()}`)
+                .join('\n');
+            const lastOutgoingIndex = chronologicalMessages.map(msg => Boolean(msg?.out)).lastIndexOf(true);
+            const messagesAfterLastReply = chronologicalMessages.slice(lastOutgoingIndex + 1);
+            const validMessages = messagesAfterLastReply.filter(msg => msg && !msg.out && (msg.message || msg.text || '').trim());
+            if (!validMessages.length) {
+                console.log(`[AILead] Debounced private conversation ${chatId} ignored. Reason: no_valid_private_messages`);
+                return;
+            }
+
+            const lastMsg = validMessages[validMessages.length - 1];
+            const combinedText = validMessages.map(msg => (msg.message || msg.text || '').trim()).filter(Boolean).join('\n');
+            if (!combinedText) {
+                console.log('[AILead] Debounced private conversation ignored. Reason: empty_private_text', {
+                    accountId,
+                    chatId,
+                    messages: validMessages.length,
+                    messageIds: validMessages.map(msg => msg.id).slice(-5),
+                });
+                return;
+            }
+
+            console.log(`[AILead] Debounced private messages combined from ${chatId} (${validMessages.length} msgs): "${combinedText.replace(/\n/g, ' | ')}"`);
+
+            const privateMessage = {
+                id: lastMsg.id,
+                message: combinedText,
+                text: combinedText,
+                out: lastMsg.out,
+                media: lastMsg.media,
+                sender: lastMsg.sender || entity,
+                senderId: lastMsg.senderId || entity.id,
+                chat: entity,
+                chatId: lastMsg.chatId || entity.id,
+                peerId: lastMsg.peerId,
+                isPrivate: true,
+                replyToMsgId: lastMsg.replyToMsgId,
+                replyTo: lastMsg.replyTo,
+                recentPrivateContext,
+            };
+
+            const result = await aiLeadService.handleIncoming({ accountId, client, message: privateMessage });
+            if (result && result.status && result.status !== 'ignored') {
+                console.log(`[AILead] Debounced private conversation ${chatId} processed status: ${result.status}`);
+            } else if (result && result.status === 'ignored') {
+                console.log(`[AILead] Debounced private conversation ${chatId} ignored. Reason: ${result.reason}`);
+            }
+        } catch (err) {
+            console.error(`[AILead] Error in processPrivateConversation for ${chatId}:`, err.message);
+        }
+    }
+
+    async scanUnreadPrivateMessages({ accountIds = [], dialogLimit = 100, messageLimit = 5, source = 'manual', writeLog = true } = {}) {
+        const aiLeadService = require('./aiLeadService');
+        const settings = await require('./models/Setting').findOne({ type: 'global_app_settings' });
+        if (settings?.aiLeadUserReplyEnabled === false) {
+            return { success: false, error: 'Trả lời tin nhắn user đang tắt.' };
+        }
+        if (!settings.openaiApiKey) {
+            return { success: false, error: 'Thiếu AI API Key trong Settings.' };
+        }
+        const targetAccountIds = Array.isArray(accountIds) && accountIds.length > 0
+            ? accountIds.map(String)
+            : Array.isArray(settings.aiLeadAccountIds) && settings.aiLeadAccountIds.length > 0
+                ? settings.aiLeadAccountIds.map(String)
+            : Array.from(this.clients.keys());
+        const summary = {
+            success: true,
+            source,
+            accountIds: targetAccountIds,
+            accounts: 0,
+            dialogs: 0,
+            scanned: 0,
+            queued: 0,
+            sent: 0,
+            ignored: 0,
+            ignoredReasons: {},
+            errors: [],
+        };
+
+        console.log('[AILead] Private unread scan started:', { source, accounts: targetAccountIds.length });
+        for (const accountId of targetAccountIds) {
+            const client = this.clients.get(accountId);
+            if (!client) {
+                summary.errors.push({ accountId, error: 'Account not connected' });
+                console.log('[AILead] Private scan skipped account:', { accountId, reason: 'Account not connected' });
+                continue;
+            }
+            summary.accounts += 1;
+
+            try {
+                const dialogs = await client.getDialogs({ limit: Number(dialogLimit) || 100 });
+                const privateDialogs = dialogs.filter((dialog) => {
+                    const entity = dialog.entity || {};
+                    const unreadCount = Number(dialog.unreadCount || dialog.unread_count || 0);
+                    const isUser = dialog.isUser || entity.className === 'User';
+                    return isUser && unreadCount > 0 && !entity.bot && !entity.self;
+                });
+
+                summary.dialogs += privateDialogs.length;
+                if (!privateDialogs.length) console.log('[AILead] No unread private dialogs for account:', { accountId, totalDialogs: dialogs.length });
+                for (const dialog of privateDialogs) {
+                    const entity = dialog.entity;
+                    const unreadCount = Number(dialog.unreadCount || dialog.unread_count || 0);
+                    const unreadLimit = Math.max(1, Math.min(Number(messageLimit) || 5, unreadCount || 1, 20));
+                    const limit = Math.max(unreadLimit, 20);
+                    const messages = await client.getMessages(entity, { limit });
+
+                    const chronologicalMessages = messages.slice().reverse();
+                    const lastOutgoingIndex = chronologicalMessages.map(msg => !!msg.out).lastIndexOf(true);
+                    const unansweredMessages = chronologicalMessages
+                        .slice(lastOutgoingIndex + 1)
+                        .filter(msg => msg && !msg.out && (msg.message || msg.text || '').trim());
+                    const validMessages = unansweredMessages.length > 0
+                        ? unansweredMessages
+                        : chronologicalMessages.filter(msg => msg && !msg.out && (msg.message || msg.text || '').trim()).slice(-unreadLimit);
+                    if (validMessages.length > 0) {
+                        console.log('[AILead] Private unread conversation found:', { accountId, chatId: entity.id?.toString?.() || String(entity.id || ''), unreadCount, validMessages: validMessages.length });
+                        const recentPrivateContext = chronologicalMessages
+                            .filter(msg => msg && (msg.message || msg.text || '').trim())
+                            .slice(-20)
+                            .map(msg => `${msg.out ? 'TeleShopBot.Com' : 'Customer'}: ${(msg.message || msg.text || '').trim()}`)
+                            .join('\\n');
+                        const lastMsg = validMessages[validMessages.length - 1];
+                        const combinedText = validMessages.map(msg => (msg.message || msg.text || '').trim()).filter(Boolean).join('\n');
+
+                        if (!combinedText) {
+                            summary.scanned += 1;
+                            summary.ignored += 1;
+                            summary.ignoredReasons.empty_private_text = (summary.ignoredReasons.empty_private_text || 0) + 1;
+                            console.log('[AILead] Private conversation ignored:', {
+                                accountId,
+                                chatId: entity.id?.toString?.() || String(entity.id || ''),
+                                messageId: lastMsg.id,
+                                reason: 'empty_private_text',
+                                validMessages: validMessages.length,
+                            });
+                            continue;
+                        }
+
+                        const privateMessage = {
+                            id: lastMsg.id,
+                            message: combinedText,
+                            text: combinedText,
+                            out: lastMsg.out,
+                            media: lastMsg.media,
+                            sender: lastMsg.sender || entity,
+                            senderId: lastMsg.senderId || entity.id,
+                            chat: entity,
+                            chatId: lastMsg.chatId || entity.id,
+                            peerId: lastMsg.peerId,
+                            isPrivate: true,
+                            replyToMsgId: lastMsg.replyToMsgId,
+                            replyTo: lastMsg.replyTo,
+                            recentPrivateContext,
+                        };
+
+                        const result = await aiLeadService.handleIncoming({ accountId, client, message: privateMessage });
+                        summary.scanned += 1;
+                        if (result?.status === 'queued') {
+                            summary.queued += 1;
+                            console.log(`[AILead] Private conversation ${entity.id} queued. Category: ${result.item?.category}`);
+                        }
+                        else if (result?.status === 'sent') {
+                            summary.sent += 1;
+                            console.log(`[AILead] Private conversation ${entity.id} sent response.`);
+                        }
+                        else if (result?.status === 'error') {
+                            summary.success = false;
+                            summary.errors.push({ accountId, messageId: lastMsg.id, error: result.error || 'AI handler error' });
+                            console.error(`[AILead] Private conversation ${entity.id} error:`, result.error);
+                        }
+                        else {
+                            summary.ignored += 1;
+                            const reason = result?.reason || 'unknown';
+                            summary.ignoredReasons[reason] = (summary.ignoredReasons[reason] || 0) + 1;
+                            console.log('[AILead] Private conversation ignored:', {
+                                accountId,
+                                chatId: entity.id?.toString?.() || String(entity.id || ''),
+                                messageId: lastMsg.id,
+                                senderId: privateMessage.senderId?.toString?.() || String(privateMessage.senderId || ''),
+                                reason,
+                                decision: result?.decision || null,
+                                textPreview: combinedText.slice(0, 180),
+                            });
+                        }
+                    }
+                }
+            } catch (err) {
+                summary.success = false;
+                summary.errors.push({ accountId, error: err.message });
+            }
+        }
+
+        console.log('[AILead] Private unread scan finished:', summary);
+        if (writeLog) await this.writeAiLeadScanLog(summary, source);
+        return summary;
+    }
+
     // ─── FORUM TOPICS ──────────────────────────────────
     async getForumTopics(accountId, chatId) {
         return this.withAccount(accountId, async (client) => {
@@ -524,10 +1075,12 @@ class TelegramMultiClient {
     }
 
     // ─── MESSAGES: Browse recent messages ──────────────
-    async getMessages(accountId, chatId, limit = 30) {
+    async getMessages(accountId, chatId, limit = 30, topicId = null) {
         return this.withAccount(accountId, async (client) => {
             const entity = await this.resolveEntity(client, chatId);
-            const messages = await client.getMessages(entity, { limit });
+            const options = { limit };
+            if (topicId) options.replyTo = Number(topicId);
+            const messages = await client.getMessages(entity, options);
             return messages.map(m => {
                 let replyMarkup = null;
                 if (m.replyMarkup && m.replyMarkup.rows) {
@@ -557,6 +1110,10 @@ class TelegramMultiClient {
                     hasMedia: !!m.media,
                     mediaType: m.media?.className || null,
                     fromId: m.fromId?.userId?.toString() || null,
+                    senderUsername: m.sender?.username ? `@${m.sender.username}` : '',
+                    senderName: m.sender
+                        ? [m.sender.firstName, m.sender.lastName].filter(Boolean).join(' ')
+                        : '',
                     replyMarkup
                 };
             });
@@ -790,8 +1347,7 @@ class TelegramMultiClient {
                             // Basic Group - thường nếu bị kích/ban sẽ văng lỗi ngay ở resolveEntity
                             if (entity.left || entity.kicked) {
                                 notParticipant = true;
-                            }
-                        }
+                            }                    }
                     } catch (err) {
                         const msg = err.message || '';
                         if (msg.includes('CHANNEL_PRIVATE') || msg.includes('USER_BANNED_IN_CHANNEL')) {
@@ -862,8 +1418,7 @@ class TelegramMultiClient {
                                 }
                             } catch (e) {
                                 console.error('[Validation FWD check error]', e.message);
-                            }
-                        }
+                            }                    }
                     }
 
                     if (report.reasons.length === 0) {
@@ -1039,9 +1594,9 @@ class TelegramMultiClient {
             try {
                 const { statusRule, phoneRule } = rules;
                 const mapRule = (ruleStr) => {
-                    if (ruleStr === 'contacts') return new Api.InputPrivacyRuleAllowContacts();
-                    if (ruleStr === 'all') return new Api.InputPrivacyRuleAllowAll();
-                    return new Api.InputPrivacyRuleDisallowAll();
+                    if (ruleStr === 'contacts') return new Api.InputPrivacyValueAllowContacts();
+                    if (ruleStr === 'all') return new Api.InputPrivacyValueAllowAll();
+                    return new Api.InputPrivacyValueDisallowAll();
                 };
 
                 if (statusRule) {
@@ -1575,3 +2130,9 @@ class TelegramMultiClient {
 }
 
 module.exports = new TelegramMultiClient();
+
+
+
+
+
+

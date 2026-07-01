@@ -4,46 +4,79 @@ const PostCampaign = require('./models/PostCampaign');
 const { notifyAdmin, getBot } = require('./botService');
 const cron = require('node-cron');
 const { Button } = require('telegram/tl/custom/button');
-const axios = require('axios');
+const { createChatCompletion } = require('./aiClient');
+const GlobalSetting = require('./models/Setting');
 
-async function rewriteTextWithAI(text, apiKey) {
-  if (!apiKey || !text) return text;
+async function rewriteTextWithAI(text, settings) {
+  if (!settings?.openaiApiKey || !text) return text;
   try {
-    const response = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: 'Bạn là trợ lý giúp viết lại nội dung bài đăng bán hàng/marketing để tránh bộ lọc spam của mạng xã hội. Hãy viết lại nội dung được cung cấp bằng tiếng Việt sao cho khác đi nhưng giữ nguyên ý nghĩa, giữ nguyên các icon/emoji, và đặc biệt là giữ nguyên các liên kết (URL) và thẻ tag (@username) nếu có. Hãy phản hồi CHỈ bằng nội dung đã viết lại, không thêm lời chào, không thêm phần giải thích hay đóng khung.'
-          },
-          {
-            role: 'user',
-            content: text
-          }
-        ],
-        temperature: 0.8
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
+    const result = await createChatCompletion(
+      settings,
+      [
+        {
+          role: 'system',
+          content: 'You rewrite Telegram sales or marketing posts in English. Keep the original meaning, preserve emojis, URLs, @mentions, spin syntax, and Telegram HTML tags exactly when present. You may improve Telegram HTML parse formatting when useful using only supported tags such as <b>, <i>, <u>, <s>, <code>, <pre>, <blockquote>, <a href="https://...">, <tg-spoiler>, and <tg-emoji emoji-id="...">. Return only the rewritten post text, no markdown fences or extra commentary.',
         },
-        timeout: 15000
-      }
+        {
+          role: 'user',
+          content: text,
+        },
+      ],
+      { temperature: 0.8, maxTokens: 1200, sessionPrefix: 'auto-post-rewrite' },
     );
-    const result = response.data?.choices?.[0]?.message?.content?.trim();
-    if (result) {
-      console.log(`[AI-Rewrite] Successfully rewrote content.`);
-      return result;
+
+    const rewritten = result.content?.trim();
+    if (rewritten) {
+      console.log(`[AI-Rewrite] Successfully rewrote content with ${result.model}.`);
+      return rewritten;
     }
   } catch (err) {
-    console.error(`[AI-Rewrite] Error:`, err.response?.data || err.message);
+    console.error('[AI-Rewrite] Error:', err.message);
   }
   return text;
 }
 
+async function generateAutoPostContentDraft(payload = {}) {
+  const settings = await GlobalSetting.findOne({ type: 'global_app_settings' });
+  if (!settings?.openaiApiKey) {
+    throw new Error('Thiếu AI API Key trong Settings.');
+  }
+
+  const action = payload.action || 'rewrite';
+  const content = String(payload.content || '').trim();
+  const actionPrompts = {
+    rewrite: 'Rewrite the provided Telegram post from the existing content. Keep the same meaning, offers, URLs, @mentions, emojis, and important details. Improve clarity, conversion, and natural wording.',
+    new: 'Write a completely new Telegram post based on the provided content. Keep the same core product, offer, URLs, @mentions, and constraints, but use a new structure and fresh wording.',
+    spin: 'Create a full semantic spin-text version using {A|B|C}. Preserve every Telegram HTML tag exactly, especially <tg-emoji ...> tags, and spin only human-readable text around them. Add multiple meaningful alternatives to titles, hooks, feature descriptions, CTAs, and hashtags. Every option inside each brace must fit grammatically with every surrounding sentence so any generated combination reads naturally and preserves the full meaning. The output must clearly differ from the source and must contain many spin groups.',
+    html: 'Convert or improve the provided content for Telegram HTML parse mode. Add formatting only where useful and preserve meaning, URLs, @mentions, and emojis.',
+  };
+
+  if (!actionPrompts[action]) {
+    throw new Error('AI action không hợp lệ.');
+  }
+  if (!content) {
+    throw new Error('Vui lòng nhập content trước khi dùng AI.');
+  }
+
+  const result = await createChatCompletion(
+    settings,
+    [
+      {
+        role: 'system',
+        content: 'You are an expert Telegram content editor. Return only the final Telegram post text, no explanation and no markdown fences. The output must be ready for Telegram HTML parse mode. You may use Telegram-supported HTML tags: <b>, <strong>, <i>, <em>, <u>, <ins>, <s>, <strike>, <del>, <code>, <pre>, <blockquote>, <a href="https://...">text</a>, <tg-spoiler>, and <tg-emoji emoji-id="...">emoji</tg-emoji>. Do not invent unsupported tags. Preserve existing <tg-emoji ...>...</tg-emoji> tags exactly. Keep links and @mentions intact unless asked to rewrite wording around them.',
+      },
+      {
+        role: 'user',
+        content: `${actionPrompts[action]}\n\nSource content:\n${content}`,
+      },
+    ],
+    { temperature: action === 'spin' ? 0.75 : 0.85, maxTokens: action === 'spin' ? 6000 : 3000, sessionPrefix: `auto-post-${action}`, timeoutMs: 0 },
+  );
+
+  const generated = String(result.content || '').trim().replace(/^```(?:html|text)?\s*/i, '').replace(/```$/i, '').trim();
+  if (!generated) throw new Error('AI không trả về nội dung.');
+  return { success: true, content: generated, model: result.model };
+}
 
 function obfuscateLinks(text) {
   if (!text) return text;
@@ -215,11 +248,117 @@ function getDelayMins(delayStr) {
     return !isNaN(val) && val > 0 ? val : 5;
 }
 
+function getTargetScheduleValue(campaign, target) {
+    if (target?.scheduleType === 'random' || target?.scheduleType === 'fixed') {
+        return target.customSchedule || campaign.delayBetweenPosts;
+    }
+    return campaign.delayBetweenPosts;
+}
+
+function getNextTargetRunAt(campaign, target, referenceDate = new Date()) {
+    const scheduleValue = getTargetScheduleValue(campaign, target);
+    const parsed = parseSchedule(scheduleValue);
+
+    if (target?.scheduleType === 'fixed' && parsed?.type === 'fixed') {
+        return getNextFixedTime(parsed.times, referenceDate);
+    }
+
+    if (target?.scheduleType === 'fixed' && parsed?.type !== 'fixed') {
+        return new Date(referenceDate.getTime() + getDelayMins(campaign.delayBetweenPosts) * 60000);
+    }
+
+    return new Date(referenceDate.getTime() + getDelayMins(scheduleValue) * 60000);
+}
+
+function getInitialTargetRunAt(campaign, target, referenceDate = new Date()) {
+    if (campaign.firstRunMode === 'random') {
+        return getNextTargetRunAt(campaign, target, referenceDate);
+    }
+    return new Date(referenceDate.getTime());
+}
+
+function getRandomInt(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function getTelegramErrorMessage(err) {
+    return err?.message || String(err || '');
+}
+
+function isPhotoSendForbiddenError(err) {
+    const message = getTelegramErrorMessage(err);
+    return message.includes('CHAT_SEND_PHOTOS_FORBIDDEN')
+        || message.includes('PHOTO_SEND_FORBIDDEN')
+        || message.includes('CHAT_SEND_MEDIA_FORBIDDEN');
+}
+
+function isTemporaryAntiRaidError(err) {
+    const message = getTelegramErrorMessage(err);
+    return /(?:FLOOD_WAIT|FLOOD_PREMIUM_WAIT|SLOWMODE_WAIT)_\d+/.test(message)
+        || message.includes('PEER_FLOOD')
+        || message.includes('USER_RESTRICTED');
+}
+
+function parseTelegramSafetyError(err) {
+    const message = err?.message || String(err || '');
+    const flood = message.match(/(?:FLOOD_WAIT|FLOOD_PREMIUM_WAIT)_(\d+)/);
+    if (flood) {
+        return {
+            type: 'flood',
+            seconds: Math.max(Number(flood[1]) || 60, 60),
+            fatal: false,
+            message,
+        };
+    }
+
+    const slowmode = message.match(/SLOWMODE_WAIT_(\d+)/);
+    if (slowmode) {
+        return {
+            type: 'slowmode',
+            seconds: Math.max(Number(slowmode[1]) || 30, 30),
+            fatal: false,
+            message,
+        };
+    }
+
+    if (message.includes('PEER_FLOOD') || message.includes('USER_RESTRICTED')) {
+        return {
+            type: 'account_pause',
+            seconds: 6 * 60 * 60,
+            fatal: false,
+            message,
+        };
+    }
+
+    if (
+        message.includes('USER_BANNED_IN_CHANNEL') ||
+        message.includes('CHAT_WRITE_FORBIDDEN') ||
+        message.includes('CHAT_SEND_PLAIN_FORBIDDEN') ||
+        message.includes('CHAT_SEND_MEDIA_FORBIDDEN') ||
+        message.includes('CHAT_ADMIN_REQUIRED') ||
+        message.includes('CHANNEL_PRIVATE')
+    ) {
+        return {
+            type: 'target_disable',
+            seconds: 0,
+            fatal: true,
+            message,
+        };
+    }
+
+    return null;
+}
+
 class AutoPostManager {
     constructor() {
         this.timers = new Map(); // key: targetKey (campaignId:targetId:accountId)
         this.nextRunTimes = new Map();
         this.cronJob = null;
+        this.queue = [];
+        this.queueKeys = new Set();
+        this.dispatcherRunning = false;
+        this.accountCooldowns = new Map();
+        this.targetCooldowns = new Map();
     }
 
     start() {
@@ -242,42 +381,35 @@ class AutoPostManager {
         try {
             const activeCampaigns = await PostCampaign.find({ isRunning: true });
             const activeTargetKeys = new Set();
-            let executionDelayOffset = 0; // Spike guard for missed targets
+            let executionDelayOffset = 0;
 
             for (const camp of activeCampaigns) {
                 const maxPosts = (typeof camp.maxPostsPerDay === 'number' && camp.maxPostsPerDay > 0) ? camp.maxPostsPerDay : 3;
                 let needsSave = false;
-
                 const validTargets = camp.targets.filter(t => !t.isDisabled);
                 if (validTargets.length === 0) continue;
 
-                // 1. Heal and sort the belt
-                validTargets.sort((a, b) => {
-                    const timeA = a.nextRunAt ? new Date(a.nextRunAt).getTime() : 0;
-                    const timeB = b.nextRunAt ? new Date(b.nextRunAt).getTime() : 0;
-                    return timeA - timeB;
-                });
-
-                let beltTime = Date.now();
-                for (const t of validTargets) {
-                    const currentRunTime = t.nextRunAt ? new Date(t.nextRunAt).getTime() : 0;
-                    if (currentRunTime < beltTime) {
-                        t.nextRunAt = new Date(beltTime);
-                        needsSave = true;
-                    }
-                    beltTime = new Date(t.nextRunAt).getTime() + (getDelayMins(camp.delayBetweenPosts) * 60000);
-                }
-
-                // 2. Execute & Slide
+                const now = new Date();
                 for (const target of validTargets) {
                     const accId = target.accountId || (camp.accounts && camp.accounts.length > 0 ? camp.accounts[0] : 'bot');
                     const targetKey = `${camp._id}:${target.chatId}:${target.topicId || '0'}:${accId}`;
                     activeTargetKeys.add(targetKey);
 
-                    // Allow 5-second drift
-                    if (new Date(target.nextRunAt).getTime() <= Date.now() + 5000) {
-                        // Check daily limits
-                        const todayStr = new Date().toISOString().split('T')[0];
+                    const currentRunAt = toValidDate(target.nextRunAt);
+                    if (!currentRunAt) {
+                        if (camp.firstRunMode === 'random') {
+                            target.nextRunAt = getNextTargetRunAt(camp, target, now);
+                        } else {
+                            target.nextRunAt = new Date(now.getTime() + executionDelayOffset);
+                            executionDelayOffset += 60_000;
+                        }
+                        needsSave = true;
+                        this.nextRunTimes.set(targetKey, new Date(target.nextRunAt).getTime());
+                        continue;
+                    }
+
+                    if (currentRunAt.getTime() <= now.getTime() + 5000) {
+                        const todayStr = now.toISOString().split('T')[0];
                         if (target.dailySentDate !== todayStr) {
                             target.dailySentCount = 0;
                             target.dailySentDate = todayStr;
@@ -285,48 +417,19 @@ class AutoPostManager {
                         }
 
                         if (target.dailySentCount >= maxPosts) {
-                            // Hit limit, schedule for tomorrow
-                            const tomorrow = new Date();
+                            const tomorrow = new Date(now);
                             tomorrow.setDate(tomorrow.getDate() + 1);
                             tomorrow.setHours(0, 0, 0, 0);
-
-                            let maxTomorrow = tomorrow.getTime();
-                            for (const o of validTargets) {
-                                if (o !== target && o.nextRunAt) {
-                                    const oTime = new Date(o.nextRunAt).getTime();
-                                    if (oTime >= tomorrow.getTime()) {
-                                        maxTomorrow = Math.max(maxTomorrow, oTime);
-                                    }
-                                }
-                            }
-                            target.nextRunAt = new Date(maxTomorrow + getDelayMins(camp.delayBetweenPosts) * 60000);
+                            target.nextRunAt = getNextTargetRunAt(camp, target, tomorrow);
                             needsSave = true;
-                            console.log(`[AutoPost] Target ${target.name} reached daily limit (${maxPosts}). Scheduled tomorrow at ${target.nextRunAt}`);
+                            console.log(`[AutoPost] Target ${target.name} reached daily limit (${maxPosts}). Scheduled independently at ${target.nextRunAt}`);
                         } else {
-                            // Execute Job
-                            setTimeout(() => {
-                                this.executeJob(camp, target, accId, targetKey).catch(() => {});
-                            }, executionDelayOffset);
-                            executionDelayOffset += 4000;
-                            
+                            this.enqueueJob(camp, target, accId, targetKey, executionDelayOffset);
+                            executionDelayOffset += 60_000;
                             target.dailySentCount++;
+                            target.nextRunAt = getNextTargetRunAt(camp, target, now);
                             needsSave = true;
-
-                            // Re-append to back of TODAY's belt
-                            let maxToday = Date.now();
-                            const todayEnd = new Date();
-                            todayEnd.setHours(23, 59, 59, 999);
-
-                            for (const o of validTargets) {
-                                if (o !== target && o.nextRunAt) {
-                                    const oTime = new Date(o.nextRunAt).getTime();
-                                    if (oTime <= todayEnd.getTime()) {
-                                        maxToday = Math.max(maxToday, oTime);
-                                    }
-                                }
-                            }
-                            target.nextRunAt = new Date(maxToday + getDelayMins(camp.delayBetweenPosts) * 60000);
-                            console.log(`[AutoPost] Scheduled next post for ${target.name} at ${target.nextRunAt} (Sent today: ${target.dailySentCount}/${maxPosts})`);
+                            console.log(`[AutoPost] Scheduled independent next post for ${target.name} at ${target.nextRunAt} (Sent today: ${target.dailySentCount}/${maxPosts})`);
                         }
                     }
 
@@ -334,20 +437,96 @@ class AutoPostManager {
                 }
 
                 if (needsSave) {
-                    await camp.save(); 
+                    await camp.save();
                 }
             }
 
-            // Cleanup inactive targets
             for (const key of this.nextRunTimes.keys()) {
                 if (!activeTargetKeys.has(key)) {
                     this.nextRunTimes.delete(key);
                 }
             }
-
         } catch (err) {
             console.error('[AutoPost] Cron loop errored:', err);
         }
+    }
+
+    enqueueJob(campaign, target, accountId, targetKey, delayMs = 0) {
+        if (this.queueKeys.has(targetKey)) return;
+        this.queueKeys.add(targetKey);
+        this.queue.push({
+            campaign,
+            target,
+            accountId,
+            targetKey,
+            availableAt: Date.now() + Math.max(0, delayMs),
+        });
+        this.runDispatcher().catch((err) => {
+            console.error('[AutoPost] Dispatcher errored:', err);
+        });
+    }
+
+    async runDispatcher() {
+        if (this.dispatcherRunning) return;
+        this.dispatcherRunning = true;
+
+        try {
+            while (this.queue.length > 0) {
+                this.queue.sort((a, b) => a.availableAt - b.availableAt);
+                const job = this.queue.shift();
+                const waitMs = Math.max(0, job.availableAt - Date.now());
+                if (waitMs > 0) await sleep(waitMs);
+
+                this.queueKeys.delete(job.targetKey);
+                const cooldownUntil = this.getCooldownUntil(job.accountId, job.targetKey);
+                if (cooldownUntil > Date.now()) {
+                    job.availableAt = cooldownUntil + getRandomInt(15_000, 45_000);
+                    this.enqueueJob(job.campaign, job.target, job.accountId, job.targetKey, job.availableAt - Date.now());
+                    continue;
+                }
+
+                await sleep(getRandomInt(15_000, 45_000));
+                await this.executeJob(job.campaign, job.target, job.accountId, job.targetKey).catch(() => {});
+            }
+        } finally {
+            this.dispatcherRunning = false;
+            if (this.queue.length > 0) {
+                this.runDispatcher().catch((err) => console.error('[AutoPost] Dispatcher restart errored:', err));
+            }
+        }
+    }
+
+    getCooldownUntil(accountId, targetKey) {
+        return Math.max(
+            this.accountCooldowns.get(accountId) || 0,
+            this.targetCooldowns.get(targetKey) || 0,
+        );
+    }
+
+    async applySafetyError(err, campaign, target, accountId, targetKey) {
+        const safety = parseTelegramSafetyError(err);
+        if (!safety) return false;
+
+        const until = Date.now() + safety.seconds * 1000;
+        if (safety.type === 'flood' || safety.type === 'account_pause') {
+            this.accountCooldowns.set(accountId, until);
+        }
+        if (safety.type === 'slowmode') {
+            this.targetCooldowns.set(targetKey, until);
+        }
+        if (safety.type === 'target_disable') {
+            target.isDisabled = true;
+            target.lastError = safety.message.substring(0, 180);
+        } else {
+            target.nextRunAt = new Date(until + getRandomInt(60_000, 180_000));
+            target.lastError = safety.message.substring(0, 180);
+        }
+
+        await campaign.save();
+
+        const resumeAt = safety.seconds > 0 ? new Date(until).toLocaleString('vi-VN') : 'đã dừng';
+        notifyAdmin(`⚠️ *CẢNH BÁO AN TOÀN TELEGRAM*\nChiến dịch: [${campaign.name}]\nTarget: ${target.name}\nLỗi: \`${target.lastError}\`\nHành động: ${safety.type === 'target_disable' ? 'Tắt target' : `Tạm dừng đến ${resumeAt}`}`);
+        return true;
     }
 
     /* 
@@ -364,9 +543,9 @@ class AutoPostManager {
         await sleep(delayMs);
 
         if (campaign.type === 'forward' && campaign.forwardSource) {
-            await this.executeForward(campaign, target, accountId);
+            await this.executeForward(campaign, target, accountId, targetKey);
         } else {
-            await this.executePost(campaign, target, accountId);
+            await this.executePost(campaign, target, accountId, targetKey);
         }
     }
 
@@ -420,7 +599,8 @@ class AutoPostManager {
         }
     }
 
-    async executeForward(campaign, target, accountId) {
+    async executeForward(campaign, target, accountId, targetKey = null) {
+        targetKey = targetKey || `${campaign._id}:${target.chatId}:${target.topicId || '0'}:${accountId}`;
         const source = campaign.forwardSource;
         if (!source || !source.fromChatId || !source.messageIds || source.messageIds.length === 0) return;
 
@@ -472,11 +652,10 @@ class AutoPostManager {
                             // Apply AI Rewrite if enabled in fallback
                             if (campaign.useAI) {
                                 try {
-                                    const GlobalSetting = require('./models/Setting');
                                     const s = await GlobalSetting.findOne({ type: 'global_app_settings' });
                                     if (s && s.openaiApiKey) {
                                         console.log(`[AutoPost] Requesting Fallback AI rewrite for campaign: ${campaign.name}`);
-                                        text = await rewriteTextWithAI(text, s.openaiApiKey);
+                                        text = await rewriteTextWithAI(text, s);
                                     }
                                 } catch (aiErr) {
                                     console.error(`[AutoPost] Fallback AI Rewrite error:`, aiErr.message);
@@ -545,6 +724,9 @@ class AutoPostManager {
             }
 
             await this.logAction({ ...logBase, status: 'fail', errorMessage: errMsg });
+            if (await this.applySafetyError(err, campaign, target, accountId, targetKey)) {
+                throw err;
+            }
             
             // Auto Disable on fatal restrictions
             if (errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') || errMsg.includes('ALLOW_PAYMENT_REQUIRED') || errMsg.includes('USER_BANNED_IN_CHANNEL')) {
@@ -559,7 +741,8 @@ class AutoPostManager {
         }
     }
 
-    async executePost(campaign, target, accountId) {
+    async executePost(campaign, target, accountId, targetKey = null) {
+        targetKey = targetKey || `${campaign._id}:${target.chatId}:${target.topicId || '0'}:${accountId}`;
         // Find a client to perform dynamic permission check if needed
         let clientToCheck = null;
         if (accountId && accountId !== 'bot') {
@@ -593,7 +776,7 @@ class AutoPostManager {
         }
 
         let finalMessage = '';
-        let currentParseMode = 'md';
+        let currentParseMode = 'html';
         
         let quote = campaign.quoteText || '';
         let content = campaign.contentTemplate || '';
@@ -607,7 +790,7 @@ class AutoPostManager {
             const spunQuote = spinContent(quote);
             const spunText = spinContent(content);
             // Sử dụng HTML parseMode và thẻ blockquote cho Quote
-            finalMessage = `<blockquote>${escapeHtml(spunQuote)}</blockquote>\n${escapeHtml(spunText)}`;
+            finalMessage = `<blockquote>${spunQuote}</blockquote>\n${spunText}`;
             currentParseMode = 'html';
         } else {
             finalMessage = spinContent(content);
@@ -616,11 +799,10 @@ class AutoPostManager {
         // Apply AI Rewrite if enabled
         if (campaign.useAI) {
             try {
-                const GlobalSetting = require('./models/Setting');
                 const s = await GlobalSetting.findOne({ type: 'global_app_settings' });
                 if (s && s.openaiApiKey) {
                     console.log(`[AutoPost] Requesting AI rewrite for campaign: ${campaign.name}`);
-                    finalMessage = await rewriteTextWithAI(finalMessage, s.openaiApiKey);
+                    finalMessage = await rewriteTextWithAI(finalMessage, s);
                 } else {
                     console.warn(`[AutoPost] AI Rewrite is enabled but openaiApiKey is not configured in settings.`);
                 }
@@ -658,11 +840,21 @@ class AutoPostManager {
                     message_thread_id: target.topicId || undefined,
                 };
 
-                if (campaign.imagePaths && campaign.imagePaths.length > 0) {
-                    resMsg = await bot.telegram.sendPhoto(target.chatId, campaign.imagePaths[0], {
-                        caption: messageForDelivery,
-                        ...extra,
-                    });
+                const shouldSendPhoto = campaign.imagePaths && campaign.imagePaths.length > 0 && !target.photoFallbackOnly;
+                if (shouldSendPhoto) {
+                    try {
+                        resMsg = await bot.telegram.sendPhoto(target.chatId, campaign.imagePaths[0], {
+                            caption: messageForDelivery,
+                            ...extra,
+                        });
+                    } catch (photoErr) {
+                        if (!isPhotoSendForbiddenError(photoErr) || isTemporaryAntiRaidError(photoErr)) throw photoErr;
+                        target.photoFallbackOnly = true;
+                        target.nextRunAt = new Date(Date.now() + getRandomInt(10 * 60_000, 20 * 60_000));
+                        target.lastError = getTelegramErrorMessage(photoErr).substring(0, 180);
+                        await campaign.save();
+                        throw new Error(`PHOTO_FORBIDDEN_TEXT_FALLBACK_DELAYED: ${target.lastError}`);
+                    }
                 } else {
                     resMsg = await bot.telegram.sendMessage(target.chatId, messageForDelivery, extra);
                 }
@@ -685,19 +877,28 @@ class AutoPostManager {
                 await sleep(1000 + Math.random() * 1000);
 
                 // Anti-Spam: simulate typing status
-                const isPhoto = campaign.imagePaths && campaign.imagePaths.length > 0;
+                const isPhoto = campaign.imagePaths && campaign.imagePaths.length > 0 && !target.photoFallbackOnly;
                 await telegramService.simulateTyping(client, entity, isPhoto ? 'photo' : 'text');
 
                 if (isPhoto) {
-                    const resMsg = await client.sendFile(entity, {
-                        file: campaign.imagePaths,
-                        caption: messageForDelivery,
-                        replyTo: target.topicId || undefined,
-                        parseMode: currentParseMode,
-                        buttons: replyMarkup,
-                    });
-                    if (Array.isArray(resMsg)) resMsg.forEach(m => { if(m&&m.id) sentIds.push(m.id) });
-                    else if (resMsg && resMsg.id) sentIds.push(resMsg.id);
+                    try {
+                        const resMsg = await client.sendFile(entity, {
+                            file: campaign.imagePaths,
+                            caption: messageForDelivery,
+                            replyTo: target.topicId || undefined,
+                            parseMode: currentParseMode,
+                            buttons: replyMarkup,
+                        });
+                        if (Array.isArray(resMsg)) resMsg.forEach(m => { if(m&&m.id) sentIds.push(m.id) });
+                        else if (resMsg && resMsg.id) sentIds.push(resMsg.id);
+                    } catch (photoErr) {
+                        if (!isPhotoSendForbiddenError(photoErr) || isTemporaryAntiRaidError(photoErr)) throw photoErr;
+                        target.photoFallbackOnly = true;
+                        target.nextRunAt = new Date(Date.now() + getRandomInt(10 * 60_000, 20 * 60_000));
+                        target.lastError = getTelegramErrorMessage(photoErr).substring(0, 180);
+                        await campaign.save();
+                        throw new Error(`PHOTO_FORBIDDEN_TEXT_FALLBACK_DELAYED: ${target.lastError}`);
+                    }
                 } else {
                     const resMsg = await client.sendMessage(entity, {
                         message: messageForDelivery,
@@ -719,6 +920,13 @@ class AutoPostManager {
         } catch (err) {
             const errMsg = err.message || '';
             await this.logAction({ ...logBase, status: 'fail', errorMessage: errMsg });
+            if (errMsg.includes('PHOTO_FORBIDDEN_TEXT_FALLBACK_DELAYED')) {
+                notifyAdmin(`⚠️ *AUTO POST CHUYỂN SANG TEXT*\nChiến dịch: [${campaign.name}]\nTarget: ${target.name}\nLỗi gửi ảnh: \`${target.lastError}\`\n👉 Không gửi text ngay để tránh anti-raid. Sẽ thử lại bằng text sau 10-20 phút.`);
+                return;
+            }
+            if (await this.applySafetyError(err, campaign, target, accountId, targetKey)) {
+                throw err;
+            }
             
             if (errMsg.includes('CHAT_SEND_WEBPAGE_FORBIDDEN') || errMsg.includes('ALLOW_PAYMENT_REQUIRED') || errMsg.includes('USER_BANNED_IN_CHANNEL')) {
                 console.log(`[AutoPost] Auto-disabling target ${target.name} due to fatal restriction.`);
@@ -743,6 +951,8 @@ class AutoPostManager {
             imagePaths: Array.isArray(payload.imagePaths) ? payload.imagePaths : [],
             actionButtons: Array.isArray(payload.actionButtons) ? payload.actionButtons : [],
             sendViaBot: !!payload.sendViaBot,
+            useAI: !!payload.useAI,
+            obfuscateLinks: !!payload.obfuscateLinks,
         };
 
         const target = {
@@ -792,6 +1002,10 @@ class AutoPostManager {
         };
     }
 
+    async generateAutoPostContent(payload) {
+        return generateAutoPostContentDraft(payload);
+    }
+
     getProgress() {
         const progress = [];
         for (const [key, nextRun] of this.nextRunTimes.entries()) {
@@ -812,3 +1026,4 @@ class AutoPostManager {
 }
 
 module.exports = new AutoPostManager();
+

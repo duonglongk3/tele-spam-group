@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { 
   Send, Plus, Trash2, Edit, Save, Play, Square, X, Users, MessageSquareText, 
   Image as ImageIcon, ArrowLeft, ChevronDown, ChevronRight, Loader2, Clock, Calendar, Share2,
-  ShieldCheck, CheckCircle2, AlertCircle, AlertTriangle, Search
+  ShieldCheck, CheckCircle2, AlertCircle, AlertTriangle, Search, Sparkles
 } from "lucide-react"
 import { telegramApi } from "@/lib/telegram"
 import { toast } from "sonner"
@@ -121,6 +121,7 @@ function AutoPostContent() {
   const [campaignProgress, setCampaignProgress] = useState<any[]>([])
   const [viewingProgressCampaign, setViewingProgressCampaign] = useState<any>(null)
   const [sendingNow, setSendingNow] = useState(false)
+  const [aiGeneratingAction, setAiGeneratingAction] = useState<string | null>(null)
 
   useEffect(() => { loadData() }, [])
 
@@ -392,6 +393,8 @@ function AutoPostContent() {
         imagePaths: editingCampaign.imagePaths || [],
         actionButtons: editingCampaign.actionButtons || [],
         sendViaBot: !!editingCampaign.sendViaBot,
+        useAI: !!editingCampaign.useAI,
+        obfuscateLinks: !!editingCampaign.obfuscateLinks,
         accountId: editingCampaign.accounts?.[0],
         target: editingCampaign.targets[0],
       })
@@ -428,7 +431,19 @@ function AutoPostContent() {
 
   const handleToggleRun = async (c: any) => {
     const newStatus = !c.isRunning;
-    const res = await telegramApi.saveCampaign({ ...c, isRunning: newStatus });
+    const payload = newStatus
+      ? {
+          ...c,
+          isRunning: true,
+          targets: (c.targets || []).map((target: any) => ({
+            ...target,
+            nextRunAt: undefined,
+            dailySentCount: 0,
+            dailySentDate: '',
+          })),
+        }
+      : { ...c, isRunning: false };
+    const res = await telegramApi.saveCampaign(payload);
     if (res?.success) {
       toast.success(newStatus ? `Đã BẮT ĐẦU chiến dịch ${c.name}` : `Đã DỪNG chiến dịch ${c.name}`);
       loadData();
@@ -535,10 +550,33 @@ function AutoPostContent() {
     toast.success("Đã áp dụng mẫu nội dung tiếp thị!");
   }
 
+  const handleGenerateAiContent = async (action: string) => {
+    const currentContent = editingCampaign.contentTemplate || ''
+    if (!currentContent.trim()) {
+      toast.warning('Vui lòng nhập content trước khi dùng AI.')
+      return
+    }
+
+    try {
+      setAiGeneratingAction(action)
+      const res = await telegramApi.generateAutoPostContent({ action, content: currentContent })
+      if (res?.success && res.content) {
+        setEditingCampaign((prev: any) => ({ ...prev, contentTemplate: res.content }))
+        toast.success(`AI đã viết xong bằng model: ${res.model || 'settings model'}`)
+      } else {
+        toast.error('AI lỗi: ' + (res?.error || 'Không rõ'))
+      }
+    } catch (e: any) {
+      toast.error('AI lỗi: ' + e.message)
+    } finally {
+      setAiGeneratingAction(null)
+    }
+  }
+
   // ─── EDITOR VIEW ────────────────────────────────────
   if (isEditing) {
     return (
-      <div className="p-6 md:p-8 max-w-5xl mx-auto space-y-6 fade-in pb-24">
+      <div className="p-6 md:p-8 max-w-5xl mx-auto space-y-6 fade-in pb-56 md:pb-48">
         <div className="flex justify-between items-center border-b pb-4">
           <h1 className="text-2xl font-bold">{editingCampaign._id ? 'Sửa chiến dịch' : 'Tạo chiến dịch mới'}</h1>
           <button onClick={() => setIsEditing(false)} className="text-gray-500 hover:text-gray-900"><X className="w-6 h-6" /></button>
@@ -951,9 +989,33 @@ function AutoPostContent() {
             </div>
 
             <div>
-              <label className="block text-sm font-semibold mb-2">Nội dung mẫu (Hỗ trợ Spin Text)</label>
-              <p className="text-xs text-gray-400 mb-2">Dùng cú pháp <code className="bg-gray-100 px-1 rounded">{'{A|B|C}'}</code> để random nội dung.</p>
-              <textarea className="w-full h-36 p-4 border rounded-xl bg-gray-50 text-sm resize-none"
+              <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-2">
+                <div>
+                  <label className="block text-sm font-semibold mb-1">Nội dung mẫu (Spin Text + Telegram HTML)</label>
+                  <p className="text-xs text-gray-400">
+                    Hỗ trợ <code className="bg-gray-100 px-1 rounded">{'{A|B|C}'}</code> và Telegram HTML như <code className="bg-gray-100 px-1 rounded">&lt;b&gt;</code>, <code className="bg-gray-100 px-1 rounded">&lt;a href=&quot;...&quot;&gt;</code>, <code className="bg-gray-100 px-1 rounded">&lt;tg-emoji emoji-id=&quot;...&quot;&gt;</code>.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { action: 'rewrite', label: 'AI viết lại' },
+                    { action: 'new', label: 'AI viết bài mới' },
+                    { action: 'spin', label: 'AI spin {A|B|C}' },
+                    { action: 'html', label: 'AI format HTML' },
+                  ].map(item => (
+                    <button
+                      key={item.action}
+                      type="button"
+                      onClick={() => handleGenerateAiContent(item.action)}
+                      disabled={!!aiGeneratingAction}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-100 hover:bg-indigo-100 disabled:opacity-50 flex items-center gap-1.5"
+                    >
+                      {aiGeneratingAction === item.action ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />} {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <textarea className="w-full h-44 p-4 border rounded-xl bg-gray-50 text-sm resize-none font-mono"
                 value={editingCampaign.contentTemplate}
                 onChange={e => setEditingCampaign({...editingCampaign, contentTemplate: e.target.value})} />
             </div>
@@ -968,7 +1030,7 @@ function AutoPostContent() {
               onChange={e => setEditingCampaign({ ...editingCampaign, useAI: e.target.checked })}
               className="w-4 h-4 text-purple-600 focus:ring-purple-500 rounded"
             />
-            Tự động viết lại nội dung bằng AI (gpt-4o-mini) mỗi lần gửi để tránh bị spam/trùng lặp
+            Tự động viết lại nội dung bằng AI theo API URL và Model trong Settings mỗi lần gửi để tránh bị spam/trùng lặp
           </label>
 
           <label className="flex items-center gap-3 text-sm font-medium text-blue-700 cursor-pointer select-none">

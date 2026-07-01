@@ -1,4 +1,3 @@
-const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
 const fs = require('fs');
 const path = require('path');
@@ -8,32 +7,9 @@ const PostCampaign = require('./models/PostCampaign');
 const PostLog = require('./models/PostLog');
 
 let bot = null;
-let expressApp = null;
-let server = null;
 let adminChatId = undefined;
+let aiLeadPendingBacklogNotified = false;
 const wizardSessions = new Map();
-
-function normalizeWebhookBaseUrl(rawUrl = '') {
-  const trimmed = (rawUrl || '').trim().replace(/\/$/, '');
-  if (!trimmed) return '';
-
-  try {
-    const parsed = new URL(trimmed);
-    if (!parsed.hostname.endsWith('.devtunnels.ms')) {
-      return trimmed;
-    }
-
-    const portFromHost = parsed.hostname.match(/-(\d+)\.asse\.devtunnels\.ms$/)?.[1];
-    if (portFromHost === '3000') {
-      parsed.hostname = parsed.hostname.replace('-3000.', '-3001.');
-      return parsed.toString().replace(/\/$/, '');
-    }
-
-    return trimmed;
-  } catch (_) {
-    return trimmed;
-  }
-}
 
 function renderWizard(ctx) {
    const payload = wizardSessions.get(ctx.chat.id.toString());
@@ -60,7 +36,66 @@ Số lượng Ảnh đính kèm: ${payload.imagePaths?.length || 0}`;
    ctx.reply(info, Markup.inlineKeyboard(buttons));
 }
 
-async function initBot() {
+
+function formatAiLeadPendingCard(item) {
+  return [
+    'AI Lead pending backlog',
+    `ID: ${item._id}`,
+    `Tên nhóm: ${item.chatTitle}`,
+    `Người gửi: ${item.senderName}`,
+    `Score: ${item.score} | Category: ${item.category}`,
+    '',
+    `Nội dung gửi:\n${String(item.originalText || '').slice(0, 700)}`,
+    '',
+    `Nội dung bot định trả lời:\n${item.suggestedReply}`,
+  ].join('\n');
+}
+
+function aiLeadApprovalButtons(item) {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: 'Đồng ý', callback_data: `ailead:send:${item._id}` },
+          { text: 'Từ chối', callback_data: `ailead:skip:${item._id}` },
+        ],
+      ],
+    },
+  };
+}
+
+function notifyAiLeadPendingBacklog(limit = 20) {
+  if (aiLeadPendingBacklogNotified) return;
+  aiLeadPendingBacklogNotified = true;
+  setTimeout(async () => {
+    try {
+      const AiLeadQueue = require('./models/AiLeadQueue');
+      const pending = (await AiLeadQueue.findRecent({ status: 'pending' }, limit * 3))
+        .filter((item) => !item.adminNotifiedAt && !item.autoSendAt && !item.autoSendScheduledAt)
+        .slice(0, limit);
+      if (!pending.length) return;
+      console.log(`[AILead] Re-notifying ${pending.length} unnotified pending approval rows to admin bot`);
+      for (const item of pending) {
+        const ok = await notifyAdmin(formatAiLeadPendingCard(item), null, aiLeadApprovalButtons(item));
+        if (ok) {
+          await AiLeadQueue.update(item._id, {
+            adminNotifiedAt: new Date().toISOString(),
+            adminNotifyCount: Number(item.adminNotifyCount || 0) + 1,
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      }
+    } catch (err) {
+      console.error('[AILead] pending backlog notify error:', err.message);
+    }
+  }, 1500);
+}
+async function initBot(options = {}) {
+  const {
+    silent = false,
+    setupWebhook = true,
+    notifyBacklog = true,
+  } = options;
   const setting = await GlobalSetting.findOne({ type: 'global_app_settings' });
   if (!setting || !setting.telegramBotToken) {
     console.log('[Telegram Bot] Bỏ qua khởi tạo vì chưa có Tham số Token');
@@ -74,13 +109,12 @@ async function initBot() {
       bot.stop('SIGINT');
     } catch (e) {}
   }
-  if (server) {
-    try {
-      await new Promise((resolve) => server.close(resolve));
-    } catch (e) {}
-  }
 
   bot = new Telegraf(setting.telegramBotToken);
+  bot.catch((err, ctx) => {
+    console.error('[Telegram Bot] handler error:', err);
+    ctx?.reply?.(`Lỗi bot: ${err.message}`).catch(() => {});
+  });
 
   // Global Auth Middleware
   bot.use(async (ctx, next) => {
@@ -288,6 +322,186 @@ ${c.contentTemplate ? c.contentTemplate.substring(0, 150) + '...' : '(Do Cấu h
     } catch(e) { ctx.reply('Lỗi: ' + e.message); }
   });
 
+  bot.command('ai_lead', async (ctx) => {
+    try {
+      const parts = ctx.message.text.split(' ');
+      const action = (parts[1] || 'status').toLowerCase();
+      const setting = await GlobalSetting.findOne({ type: 'global_app_settings' }) || new GlobalSetting({ type: 'global_app_settings' });
+
+      if (action === 'on' || action === 'off') {
+        setting.aiLeadEnabled = action === 'on';
+        await setting.save();
+        return ctx.reply(`AI Lead Watcher: ${setting.aiLeadEnabled ? 'ON' : 'OFF'}`);
+      }
+
+      if (action === 'mode') {
+        const mode = (parts[2] || '').toLowerCase();
+        if (!['suggest', 'auto'].includes(mode)) return ctx.reply('Cú pháp: /ai_lead mode suggest|auto');
+        setting.aiLeadMode = mode;
+        await setting.save();
+        return ctx.reply(`AI Lead mode đã đổi thành: ${mode}`);
+      }
+
+      if (action === 'accounts') {
+        const raw = parts.slice(2).join(' ').trim();
+        if (!raw) return ctx.reply('Cú pháp: /ai_lead accounts all hoặc /ai_lead accounts id1,id2');
+        setting.aiLeadAccountIds = raw.toLowerCase() === 'all'
+          ? []
+          : raw.split(/[,\s]+/).map(v => v.trim()).filter(Boolean);
+        await setting.save();
+        return ctx.reply(setting.aiLeadAccountIds.length ? `AI Lead chỉ chạy trên account: ${setting.aiLeadAccountIds.join(', ')}` : 'AI Lead chạy trên tất cả account.');
+      }
+
+      if (action === 'score') {
+        const score = Number(parts[2]);
+        if (!Number.isFinite(score) || score < 1 || score > 100) return ctx.reply('Cú pháp: /ai_lead score 85');
+        setting.aiLeadMinScore = score;
+        await setting.save();
+        return ctx.reply(`AI Lead min score: ${score}`);
+      }
+
+      if (action === 'limit') {
+        const daily = Number(parts[2]);
+        const group = Number(parts[3]);
+        const cooldown = Number(parts[4]);
+        if (![daily, group, cooldown].every(v => Number.isFinite(v) && v >= 1)) {
+          return ctx.reply('Cú pháp: /ai_lead limit [dailyPerAccount] [dailyPerGroup] [cooldownMinutes]\nVí dụ: /ai_lead limit 3 1 240');
+        }
+        setting.aiLeadMaxRepliesPerDay = daily;
+        setting.aiLeadMaxRepliesPerGroupPerDay = group;
+        setting.aiLeadCooldownMinutes = cooldown;
+        await setting.save();
+        return ctx.reply(`AI Lead limit: ${daily}/account/day, ${group}/group/day, cooldown ${cooldown} phút.`);
+      }
+
+      if (action === 'prompt') {
+        const prompt = parts.slice(2).join(' ').trim();
+        if (!prompt) return ctx.reply('Cú pháp: /ai_lead prompt [system prompt mới]');
+        setting.aiLeadPrompt = prompt;
+        await setting.save();
+        return ctx.reply('Đã cập nhật AI Lead system prompt.');
+      }
+
+      if (action === 'pending') {
+        const aiLeadService = require('./aiLeadService');
+        const items = await aiLeadService.listPending(10);
+        if (!items.length) return ctx.reply('Không có AI Lead pending reply nào.');
+        const msg = items.map((item, i) => `${i + 1}. ${item._id}
+[${item.score}] ${item.category} | ${item.sourceType} | ${item.chatTitle}
+User: ${item.senderName}
+Msg: ${item.originalText.slice(0, 120)}
+Rep: ${item.suggestedReply.slice(0, 160)}
+Send: /ai_lead send ${item._id}`).join('\n\n');
+        return ctx.reply(`AI Lead pending replies:\n\n${msg}`);
+      }
+
+      if (action === 'send') {
+        const id = parts[2];
+        if (!id) return ctx.reply('Cú pháp: /ai_lead send [id]');
+        const aiLeadService = require('./aiLeadService');
+        const result = await aiLeadService.sendPending(id);
+        if (!result.success) return ctx.reply('Không gửi được: ' + result.error);
+        return ctx.reply(`Đã gửi AI Lead reply: ${result.item._id}`);
+      }
+
+      if (action === 'skip') {
+        const id = parts[2];
+        if (!id) return ctx.reply('Cú pháp: /ai_lead skip [id]');
+        const aiLeadService = require('./aiLeadService');
+        const result = await aiLeadService.skipPending(id);
+        if (!result.success) return ctx.reply('Không skip được: ' + result.error);
+        return ctx.reply(`Đã skip AI Lead reply: ${result.item._id}`);
+      }
+
+      if (action === 'edit') {
+        const id = parts[2];
+        const text = parts.slice(3).join(' ').trim();
+        if (!id || !text) return ctx.reply('Cú pháp: /ai_lead edit [id] [text rep mới]');
+        const aiLeadService = require('./aiLeadService');
+        const result = await aiLeadService.editPending(id, text);
+        if (!result.success) return ctx.reply('Không sửa được: ' + result.error);
+        return ctx.reply(`Đã sửa reply ${result.item._id}:
+${result.item.suggestedReply}`);
+      }
+
+      const accounts = setting.aiLeadAccountIds?.length ? setting.aiLeadAccountIds.join(', ') : 'all';
+      return ctx.reply(`AI Lead Watcher
+Status: ${setting.aiLeadEnabled ? 'ON' : 'OFF'}
+Mode: ${setting.aiLeadMode}
+Accounts: ${accounts}
+Min score: ${setting.aiLeadMinScore}
+Limit: ${setting.aiLeadMaxRepliesPerDay}/account/day, ${setting.aiLeadMaxRepliesPerGroupPerDay}/group/day
+Cooldown: ${setting.aiLeadCooldownMinutes} phút
+
+Lệnh:
+/ai_lead on|off
+/ai_lead mode suggest|auto
+/ai_lead accounts all|id1,id2
+/ai_lead score 85
+/ai_lead limit 3 1 240
+/ai_lead prompt ...
+/ai_lead pending
+/ai_lead send [id]
+/ai_lead skip [id]
+/ai_lead edit [id] [text]`);
+    } catch(e) {
+      ctx.reply('Lỗi AI Lead: ' + e.message);
+    }
+  });
+
+  bot.action(/ailead:(send|skip):(.+)/, async (ctx) => {
+    try {
+      const action = ctx.match[1];
+      const id = ctx.match[2];
+      const aiLeadService = require('./aiLeadService');
+      console.log('[Telegram Bot] AI Lead callback received:', { action, id, chatId: ctx.chat?.id?.toString?.() });
+      
+      const result = action === 'send'
+        ? await aiLeadService.sendPending(id)
+        : await aiLeadService.skipPending(id);
+      
+      let finalStatus = action === 'send' ? 'sent' : 'skipped';
+      
+      if (!result.success) {
+        console.error('[Telegram Bot] AI Lead callback failed:', { action, id, error: result.error });
+        
+        // Nếu lỗi do item đã được xử lý từ trước (không còn pending)
+        // Chúng ta sẽ đọc trạng thái hiện tại trong DB để cập nhật đúng giao diện Telegram
+        if (result.error && (result.error.includes('trạng thái') || result.error.includes('status') || result.error.includes('sent') || result.error.includes('skipped'))) {
+          const AiLeadQueue = require('./models/AiLeadQueue');
+          const item = await AiLeadQueue.findById(id);
+          if (item) {
+            finalStatus = item.status;
+            await ctx.answerCbQuery(`Tin nhắn này đã được xử lý trước đó (${item.status === 'sent' ? 'Đã gửi' : 'Đã bỏ qua'})`);
+          } else {
+            await ctx.answerCbQuery(result.error);
+            return;
+          }
+        } else {
+          await ctx.answerCbQuery(result.error || 'Không xử lý được');
+          return;
+        }
+      } else {
+        console.log('[Telegram Bot] AI Lead callback success:', { action, id, status: result.item?.status });
+        await ctx.answerCbQuery(action === 'send' ? 'Đã gửi reply' : 'Đã từ chối');
+        finalStatus = result.item?.status || finalStatus;
+      }
+      
+      const statusText = finalStatus === 'sent'
+        ? `✅ <b>ĐÃ ĐỒNG Ý GỬI</b> lúc ${new Date().toLocaleTimeString('vi-VN')}`
+        : `❌ <b>ĐÃ TỪ CHỐI</b> lúc ${new Date().toLocaleTimeString('vi-VN')}`;
+      
+      const originalText = ctx.callbackQuery.message.text || '';
+      await ctx.editMessageText(`${statusText}\n\n${originalText}`, { parse_mode: 'HTML' }).catch((err) => {
+        console.error('[Telegram Bot] editMessageText failed:', err.message);
+      });
+    } catch (e) {
+      console.error('[Telegram Bot] AI Lead callback action error:', e);
+      await ctx.answerCbQuery('Lỗi: ' + e.message).catch(() => {});
+      await ctx.reply(`❌ Thao tác thất bại: ${e.message}`).catch(() => {});
+    }
+  });
+
   bot.command('join', async (ctx) => {
      const link = ctx.message.text.split(' ')[1];
      if (!link || !link.includes('t.me')) return ctx.reply('Cú pháp: /join https://t.me/link...');
@@ -323,6 +537,7 @@ ${c.contentTemplate ? c.contentTemplate.substring(0, 150) + '...' : '(Do Cấu h
       { command: 'fix_targets', description: 'Ân xá các nhóm bị lỗi' },
       { command: 'join', description: 'Cho máy trạm vào Group (join [link])' },
       { command: 'accounts', description: 'Danh sách TK Telegram đang dùng' },
+      { command: 'ai_lead', description: 'Quản lý AI Lead Watcher' },
       { command: 'ping', description: 'Kiểm tra hệ thống' }
     ]);
     await bot.telegram.setChatMenuButton({ menuButton: { type: 'commands' } });
@@ -621,73 +836,124 @@ ${c.contentTemplate ? c.contentTemplate.substring(0, 150) + '...' : '(Do Cấu h
      renderWizard(ctx);
   });
 
-  // Start Express & Webhook
-  expressApp = express();
-  expressApp.use(express.json());
-  
-  // Use telegraf webhook middleware
-  const baseUrl = normalizeWebhookBaseUrl(setting.telegramWebhookUrl);
-  const webhookUrl = baseUrl + '/webhook';
-  
   try {
-    expressApp.get('/', (req, res) => res.send('Bot Webhook Server is running'));
-    expressApp.get('/webhook', (req, res) => res.status(200).send('Telegram webhook endpoint ready'));
-    expressApp.post('/webhook', async (req, res) => {
-      try {
-        await bot.handleUpdate(req.body, res);
-      } catch (err) {
-        console.error('[Telegram Bot] Webhook handle error:', err);
-        if (!res.headersSent) {
-          res.status(500).send('Webhook error');
-        }
-      }
-    });
-
-    server = expressApp.listen(3001, async () => {
-      console.log('[Telegram Bot] Express server listening on 3001 for webhooks');
-
-      // Fetch Bot details
-      try {
-        const me = await bot.telegram.getMe();
-        setting.telegramBotUsername = me.username;
-        await setting.save();
-      } catch (meErr) {
-        console.error('Lỗi khi tải thông tin Bot', meErr);
-      }
-
-      if (webhookUrl && webhookUrl.startsWith('https://')) {
-        await bot.telegram.setWebhook(webhookUrl);
-        console.log(`[Telegram Bot] Webhook set to ${webhookUrl}`);
-        if (adminChatId) {
-          bot.telegram.sendMessage(adminChatId, '🤖 Bot đã kết nối lại thành công thông qua Webhook!').catch(e => console.log('Không thể gửi test message', e));
-        }
-      } else {
-         console.log(`[Telegram Bot] Webhook URL invalid (requires https): ${webhookUrl}. Falling back to long polling.`);
-         bot.telegram.deleteWebhook();
-         bot.launch();
-         if (adminChatId) {
-          bot.telegram.sendMessage(adminChatId, '🤖 Bot đã khởi động bằng chế độ Long Polling!').catch(e => {});
-        }
-      }
-    });
-  } catch (err) {
-    console.error('[Telegram Bot] Không thể thiết lập:', err);
+    const me = await bot.telegram.getMe();
+    setting.telegramBotUsername = me.username;
+    await setting.save();
+  } catch (meErr) {
+    console.error('Lỗi khi tải thông tin Bot', meErr);
   }
 
+  if (setupWebhook) {
+    const baseUrl = (setting.telegramWebhookUrl || '').trim().replace(/\/$/, '');
+    if (baseUrl && baseUrl.startsWith('https://')) {
+      const webhookUrl = `${baseUrl}/webhook`;
+      await bot.telegram.setWebhook(webhookUrl);
+      console.log(`[Telegram Bot] Webhook set to ${webhookUrl} via Next.js port 3000`);
+      if (adminChatId && !silent) {
+        bot.telegram.sendMessage(adminChatId, '🤖 Bot đã kết nối webhook qua Next.js backend port 3000.').catch(e => {});
+      }
+    } else {
+      await bot.telegram.deleteWebhook();
+      await bot.launch();
+      console.log('[Telegram Bot] Started with long polling because Webhook URL is empty.');
+      if (adminChatId && !silent) {
+        bot.telegram.sendMessage(adminChatId, '🤖 Bot đã khởi động bằng Long Polling vì chưa cấu hình Webhook URL.').catch(e => {});
+      }
+    }
+  } else {
+    console.log('[Telegram Bot] Initialized for webhook update handling without resetting webhook');
+  }
+
+  if (notifyBacklog) notifyAiLeadPendingBacklog();
+  try {
+    const aiLeadService = require('./aiLeadService');
+    if (typeof aiLeadService.startAutoSendQueue === 'function') {
+      aiLeadService.startAutoSendQueue().catch((err) => {
+        console.error('[AILead] auto-send queue startup error:', err.message);
+      });
+    }
+  } catch (err) {
+    console.error('[AILead] auto-send queue init error:', err.message);
+  }
   return bot;
 }
 
-function notifyAdmin(message, parseMode = 'Markdown') {
-  if (bot && adminChatId) {
-    const opts = parseMode ? { parse_mode: parseMode } : {};
-    bot.telegram.sendMessage(adminChatId, message, opts).catch(err => {
-      console.error('[Telegram Bot] notifyAdmin error: ', err);
+async function notifyAdmin(message, parseMode = 'Markdown', extra = {}) {
+  const notifyMeta = {
+    parseMode: parseMode || 'none',
+    hasInlineKeyboard: !!extra?.reply_markup?.inline_keyboard,
+    preview: String(message || '').slice(0, 220),
+  };
+  console.log('[Telegram Bot] notifyAdmin sending:', notifyMeta);
+
+  const sendViaFallback = async () => {
+    const setting = await GlobalSetting.findOne({ type: 'global_app_settings' });
+    if (!setting?.telegramBotToken || !setting?.telegramAdminChatId) {
+      console.error('[Telegram Bot] notifyAdmin skipped: missing token/admin chat id');
+      return false;
+    }
+    const payload = {
+      chat_id: setting.telegramAdminChatId,
+      text: message,
+      ...extra,
+    };
+    if (parseMode) payload.parse_mode = parseMode;
+    const res = await fetch(`https://api.telegram.org/bot${setting.telegramBotToken}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     });
+    const body = await res.json().catch(() => null);
+    if (!res.ok || body?.ok === false) {
+      console.error('[Telegram Bot] notifyAdmin HTTP error:', body || (await res.text().catch(() => 'unknown error')));
+      return false;
+    }
+    console.log('[Telegram Bot] notifyAdmin sent via Bot API:', {
+      messageId: body?.result?.message_id,
+      chatId: setting.telegramAdminChatId,
+    });
+    return true;
+  };
+
+  try {
+    if (bot && adminChatId) {
+      const opts = parseMode ? { parse_mode: parseMode, ...extra } : { ...extra };
+      const sent = await bot.telegram.sendMessage(adminChatId, message, opts);
+      console.log('[Telegram Bot] notifyAdmin sent via live bot:', {
+        messageId: sent?.message_id,
+        chatId: adminChatId,
+      });
+      return true;
+    }
+    const ok = await sendViaFallback();
+    console.log('[Telegram Bot] notifyAdmin fallback result:', { ok });
+    return ok;
+  } catch (err) {
+    console.error('[Telegram Bot] notifyAdmin live error, trying fallback:', err.message);
+    try {
+      const ok = await sendViaFallback();
+    console.log('[Telegram Bot] notifyAdmin fallback result:', { ok });
+    return ok;
+    } catch (fallbackErr) {
+      console.error('[Telegram Bot] notifyAdmin fallback error:', fallbackErr.message);
+      return false;
+    }
   }
 }
-
 function getBot() {
   return bot;
 }
 
-module.exports = { initBot, notifyAdmin, getBot };
+async function handleWebhookUpdate(update) {
+  if (!bot) {
+    await initBot({ silent: true, setupWebhook: false, notifyBacklog: false });
+  }
+  if (!bot) {
+    throw new Error('BOT_NOT_INITIALIZED');
+  }
+  await bot.handleUpdate(update);
+}
+
+module.exports = { initBot, notifyAdmin, getBot, handleWebhookUpdate };
+

@@ -9,7 +9,7 @@ const DB_PATH = (() => {
       return path.join(app.getPath("userData"), "telegram-auto-post.sqlite3");
     }
   } catch (e) {}
-  return path.join(__dirname, "..", "data", "telegram-auto-post.sqlite3");
+  return path.join(process.cwd(), "data", "telegram-auto-post.sqlite3");
 })();
 let dbInstance = null;
 
@@ -66,8 +66,6 @@ async function migrate() {
   await run(`
     CREATE TABLE IF NOT EXISTS telegram_accounts (
       id TEXT PRIMARY KEY,
-      apiId TEXT,
-      apiHash TEXT,
       sessionString TEXT,
       firstName TEXT,
       lastName TEXT,
@@ -106,6 +104,47 @@ async function migrate() {
       data TEXT NOT NULL
     )
   `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS ai_lead_queue (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      accountId TEXT NOT NULL,
+      chatId TEXT NOT NULL,
+      messageId TEXT NOT NULL,
+      senderId TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      data TEXT NOT NULL
+    )
+  `);
+
+  await run(`
+    CREATE TABLE IF NOT EXISTS ai_lead_blacklist (
+      id TEXT PRIMARY KEY,
+      accountId TEXT NOT NULL,
+      senderId TEXT NOT NULL,
+      senderName TEXT,
+      chatId TEXT,
+      sourceType TEXT DEFAULT 'group',
+      score INTEGER DEFAULT 0,
+      riskScore INTEGER DEFAULT 0,
+      reason TEXT,
+      createdAt TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      data TEXT NOT NULL
+    )
+  `);
+
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_ai_lead_queue_status_created_at ON ai_lead_queue (status, createdAt DESC)`,
+  );
+  await run(
+    `CREATE INDEX IF NOT EXISTS idx_ai_lead_queue_chat_message ON ai_lead_queue (accountId, chatId, messageId)`,
+  );
+  await run(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_lead_blacklist_account_sender ON ai_lead_blacklist (accountId, senderId)`,
+  );
 
   await run(
     `CREATE INDEX IF NOT EXISTS idx_post_logs_campaign_created_at ON post_logs (campaignId, createdAt DESC)`,

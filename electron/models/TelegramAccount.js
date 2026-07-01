@@ -4,8 +4,6 @@ function mapRow(row) {
   if (!row) return null;
   return {
     accountId: row.id,
-    apiId: row.apiId,
-    apiHash: row.apiHash,
     sessionString: row.sessionString,
     firstName: row.firstName,
     lastName: row.lastName,
@@ -36,8 +34,6 @@ class TelegramAccountModel {
     const now = new Date().toISOString();
     const record = {
       accountId: id,
-      apiId: update.apiId || existing?.apiId || "",
-      apiHash: update.apiHash || existing?.apiHash || "",
       sessionString: update.sessionString || existing?.sessionString || "",
       firstName: update.firstName || existing?.firstName || "",
       lastName: update.lastName || existing?.lastName || "",
@@ -49,11 +45,9 @@ class TelegramAccountModel {
     };
 
     await run(
-      `INSERT INTO telegram_accounts (id, apiId, apiHash, sessionString, firstName, lastName, username, phone, about, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO telegram_accounts (id, sessionString, firstName, lastName, username, phone, about, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
-         apiId = excluded.apiId,
-         apiHash = excluded.apiHash,
          sessionString = excluded.sessionString,
          firstName = excluded.firstName,
          lastName = excluded.lastName,
@@ -63,8 +57,6 @@ class TelegramAccountModel {
          updatedAt = excluded.updatedAt`,
       [
         record.accountId,
-        record.apiId,
-        record.apiHash,
         record.sessionString,
         record.firstName,
         record.lastName,

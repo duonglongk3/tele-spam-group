@@ -13,7 +13,8 @@ import {
   Send as SendIcon,
   MessageSquare,
   Bot,
-  Zap
+  Zap,
+  Inbox
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useState } from 'react'
@@ -24,6 +25,8 @@ const navItems = [
   { href: '/groups', label: 'Hội nhóm & Kênh', icon: MessageSquare },
   { href: '/autopost', label: 'Chiến dịch Auto Post', icon: Send },
   { href: '/quicksend', label: 'Gửi nhanh & Tương tác', icon: Zap },
+  { href: '/ai-settings', label: 'AI Settings', icon: Bot },
+  { href: '/ai-leads', label: 'Hàng chờ AI Lead', icon: Inbox },
   { href: '/logs', label: 'Lịch sử', icon: ClipboardList },
 ]
 

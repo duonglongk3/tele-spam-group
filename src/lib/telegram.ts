@@ -16,12 +16,22 @@ function ipc(channel: string, ...args: any[]) {
 export const telegramApi = {
   // ─── Accounts ────────────────────────────────────────
   getAccounts: () => ipc('telegram:getAccounts'),
-  requestLoginCode: (apiId: string, apiHash: string, phone: string) => 
-    ipc('telegram:requestLoginCode', { apiId, apiHash, phone }),
-  submitLoginCode: (code: string, password?: string) => 
-    ipc('telegram:submitLoginCode', { code, password }),
-  importSession: (apiId: string, apiHash: string, sessionString: string) =>
-    ipc('telegram:importSession', { apiId, apiHash, sessionString }),
+  requestLoginCode: (phone: string) => 
+    ipc('telegram:requestLoginCode', { phone }),
+  submitLoginCode: (phone: string, phoneCodeHash: string, code: string, password?: string) => 
+    ipc('telegram:submitLoginCode', { phone, phoneCodeHash, code, password }),
+  importSession: (sessionString: string) =>
+    ipc('telegram:importSession', { sessionString }),
+  selectDir: (title?: string) =>
+    ipc('telegram:selectDir', title),
+  selectFile: (title?: string) =>
+    ipc('telegram:selectFile', title),
+  extractArchive: (filePath: string) =>
+    ipc('telegram:extractArchive', { filePath }),
+  scanTdata: (tdataDir: string, passcode?: string) =>
+    ipc('telegram:scanTdata', { tdataDir, passcode }),
+  importTdataSession: (tdataDir: string, passcode: string | null, accountIndex: number, password?: string) =>
+    ipc('telegram:importTdataSession', { tdataDir, passcode, accountIndex, password }),
   removeAccount: (accountId: string) => 
     ipc('telegram:removeAccount', { accountId }),
   getPhoto: (accountId: string, peerId?: string) =>
@@ -68,12 +78,14 @@ export const telegramApi = {
     ipc('telegram:clickBotButton', { accountId, chatId, messageId, buttonData }),
 
   // ─── Messages / Forward / Diagnostics / Quick Actions ───────────
-  getMessages: (accountId: string, chatId: string, limit?: number) =>
-    ipc('telegram:getMessages', { accountId, chatId, limit }),
+  getMessages: (accountId: string, chatId: string, limit?: number, topicId?: number | string) =>
+    ipc('telegram:getMessages', { accountId, chatId, limit, topicId }),
   getMessageMedia: (accountId: string, chatId: string, messageId: number) =>
     ipc('telegram:getMessageMedia', { accountId, chatId, messageId }),
   sendNow: (payload: any) =>
     ipc('telegram:sendNow', payload),
+  generateAutoPostContent: (payload: any) =>
+    ipc('ai:generateAutoPostContent', payload),
   forwardMessages: (accountId: string, fromChatId: string, messageIds: number[], toChatIds: string[]) =>
     ipc('telegram:forwardMessages', { accountId, fromChatId, messageIds, toChatIds }),
   scanGroupSecurity: (accountId: string, chatId: string) =>
@@ -88,7 +100,29 @@ export const telegramApi = {
     ipc('telegram:joinChat', { accountId, linkOrUsername }),
   getInviteLink: (accountId: string, chatId: string) =>
     ipc('telegram:getInviteLink', { accountId, chatId }),
+  scanAiEngagementGroup: (accountId: string, chatId: string, limit?: number, topicId?: number | string, topicTitle?: string, purpose?: string) =>
+    ipc('aiLead:scanEngagementGroup', { accountId, chatId, limit, topicId, topicTitle, purpose }),
+  scanAiUnreadPrivate: (options?: any) =>
+    ipc('aiLead:scanUnreadPrivate', options || {}),
+  getAiLeadQueue: (filter?: any, limit?: number, page?: number) =>
+    ipc('aiLead:getQueue', { filter, limit, page }),
+  sendAiLeadPending: (id: string) =>
+    ipc('aiLead:sendPending', { id }),
+  skipAiLeadPending: (id: string) =>
+    ipc('aiLead:skipPending', { id }),
+  editAiLeadPending: (id: string, text: string) =>
+    ipc('aiLead:editPending', { id, text }),
+  getAiLeadBlacklist: () =>
+    ipc('aiLead:getBlacklist'),
+  getAiLeadBlacklistPaged: (options?: any) =>
+    ipc('aiLead:getBlacklistPaged', options || {}),
+  removeFromAiLeadBlacklist: (accountId: string, senderId: string) =>
+    ipc('aiLead:removeFromBlacklist', { accountId, senderId }),
   selectImage: () => ipc('app:selectImage'),
+
+  // ─── Settings ────────────────────────────────────────
+  getSettings: () => ipc('settings:get'),
+  saveSettings: (data: any) => ipc('settings:save', data),
 
   // ─── Campaign (SQLite) ─────────────────────────────
   getCampaigns: () => ipc('campaign:findAll'),
@@ -108,3 +142,4 @@ export const telegramApi = {
   importWorkspace: () => 
     ipc('workspace:import'),
 }
+

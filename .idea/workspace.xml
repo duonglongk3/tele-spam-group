@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="ad1c4919-3299-4d05-b123-8b7cffbac675" name="Changes" comment="">
+      <change afterPath="$PROJECT_DIR$/.agents/AGENTS.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.agents/knowledge/project_features.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.agents/knowledge/telegram_bot_role.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.agents/skills/telegram_seeding_expert/SKILL.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/telegram-auto-post.sqlite3" beforeDir="false" afterPath="$PROJECT_DIR$/data/telegram-auto-post.sqlite3" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/telegram-auto-post.sqlite3-shm" beforeDir="false" afterPath="$PROJECT_DIR$/data/telegram-auto-post.sqlite3-shm" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/data/telegram-auto-post.sqlite3-wal" beforeDir="false" afterPath="$PROJECT_DIR$/data/telegram-auto-post.sqlite3-wal" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/autoPostService.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/autoPostService.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/botService.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/botService.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/db.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/db.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/main.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/main.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/models/PostCampaign.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/models/PostCampaign.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/models/Setting.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/models/Setting.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/models/TelegramAccount.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/models/TelegramAccount.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/electron/telegramService.js" beforeDir="false" afterPath="$PROJECT_DIR$/electron/telegramService.js" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/next.config.mjs" beforeDir="false" afterPath="$PROJECT_DIR$/next.config.mjs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/app/(app)/accounts/page.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/app/(app)/accounts/page.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/app/(app)/autopost/page.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/app/(app)/autopost/page.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/app/(app)/settings/page.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/app/(app)/settings/page.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/app/layout.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/app/layout.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/components/layout/Sidebar.tsx" beforeDir="false" afterPath="$PROJECT_DIR$/src/components/layout/Sidebar.tsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/lib/telegram.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/lib/telegram.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tsconfig.tsbuildinfo" beforeDir="false" afterPath="$PROJECT_DIR$/tsconfig.tsbuildinfo" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="EmbeddingIndexingInfo">
+    <option name="cachedIndexableFilesCount" value="57" />
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GithubDefaultAccount">
+    <option name="defaultAccountId" value="48537dc4-0f82-4e7d-8e7a-20735dec6e2d" />
+  </component>
+  <component name="McpProjectServerCommands">
+    <commands />
+    <urls />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 6
+}</component>
+  <component name="ProjectId" id="3CeAOj1CXhIQi5pmVuiHQ28UTBp" />
+  <component name="ProjectViewState">
+    <option name="autoscrollFromSource" value="true" />
+    <option name="flattenModules" value="true" />
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="openDirectoriesWithSingleClick" value="true" />
+    <option name="showLibraryContents" value="true" />
+    <option name="showMembers" value="true" />
+    <option name="showVisibilityIcons" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "ModuleVcsDetector.initialDetectionPerformed": "true",
+    "RunOnceActivity.MCP Project settings loaded": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
+    "git-widget-placeholder": "main",
+    "grid.search.filter.rows": "true",
+    "javascript.nodejs.core.library.configured.version": "24.12.0",
+    "javascript.nodejs.core.library.typings.version": "24.12.4",
+    "javascript.preferred.runtime.type.id": "node",
+    "last_opened_file_path": "E:/Github/telegram_auto_post",
+    "node.js.detected.package.eslint": "true",
+    "node.js.detected.package.tslint": "true",
+    "node.js.selected.package.eslint": "(autodetect)",
+    "node.js.selected.package.tslint": "(autodetect)",
+    "nodejs_package_manager_path": "npm",
+    "npm.dev.executor": "Debug",
+    "npm.next:dev.executor": "Debug",
+    "settings.editor.selected.configurable": "dev.polek.adbwifi.settings.AdbWifiConfigurable",
+    "ts.external.directory.path": "E:\\Github\\telegram_auto_post\\node_modules\\typescript\\lib",
+    "vue.rearranger.settings.migration": "true"
+  },
+  "keyToStringList": {
+    "DatabaseDriversLRU": [
+      "mysql"
+    ]
+  }
+}]]></component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="E:\Github\telegram_auto_post" />
+    </key>
+  </component>
+  <component name="RunManager" selected="npm.dev">
+    <configuration name="dev" type="js.build_tools.npm" temporary="true" nameIsGenerated="true">
+      <package-json value="$PROJECT_DIR$/package.json" />
+      <command value="run" />
+      <scripts>
+        <script value="dev" />
+      </scripts>
+      <node-interpreter value="project" />
+      <envs />
+      <method v="2" />
+    </configuration>
+    <configuration name="next:dev" type="js.build_tools.npm" temporary="true" nameIsGenerated="true">
+      <package-json value="$PROJECT_DIR$/package.json" />
+      <command value="run" />
+      <scripts>
+        <script value="next:dev" />
+      </scripts>
+      <node-interpreter value="project" />
+      <envs />
+      <method v="2" />
+    </configuration>
+    <recent_temporary>
+      <list>
+        <item itemvalue="npm.dev" />
+        <item itemvalue="npm.next:dev" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-js-predefined-d6986cc7102b-9b0f141eb926-JavaScript-WS-253.29346.143" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="ad1c4919-3299-4d05-b123-8b7cffbac675" name="Changes" comment="" />
+      <created>1776735632396</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1776735632396</updated>
+      <workItem from="1776735633658" duration="1204000" />
+      <workItem from="1782658586082" duration="21877000" />
+      <workItem from="1782725486179" duration="16027000" />
+    </task>
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>

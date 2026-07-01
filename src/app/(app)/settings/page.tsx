@@ -20,7 +20,16 @@ export default function SettingsPage() {
     telegramWebhookUrl: '',
     telegramPairToken: '',
     telegramBotUsername: '',
-    openaiApiKey: ''
+    openaiApiKey: '',
+    aiApiUrl: 'https://api.openai.com/v1',
+    aiModel: 'claude_sonet_4.5',
+    telegramApiId: '2040',
+    telegramApiHash: 'b18441a1ff607e10a989891a5462e627',
+    telegramDeviceModel: 'Desktop',
+    telegramSystemVersion: 'Windows 10',
+    telegramAppVersion: 'Telegram Desktop 6.9.3 x64',
+    telegramLangCode: 'en',
+    telegramSystemLangCode: 'en-US',
   })
 
   useEffect(() => {
@@ -35,10 +44,19 @@ export default function SettingsPage() {
         setForm({
           telegramBotToken: res.settings.telegramBotToken || '',
           telegramAdminChatId: res.settings.telegramAdminChatId || '',
-          telegramWebhookUrl: res.settings.telegramWebhookUrl || 'https://d5x1qljf-3000.asse.devtunnels.ms/',
+          telegramWebhookUrl: res.settings.telegramWebhookUrl || 'https://d5x1qljf-3000.asse.devtunnels.ms',
           telegramPairToken: res.settings.telegramPairToken || '',
           telegramBotUsername: res.settings.telegramBotUsername || '',
-          openaiApiKey: res.settings.openaiApiKey || ''
+          openaiApiKey: res.settings.openaiApiKey || '',
+          aiApiUrl: res.settings.aiApiUrl || 'https://api.openai.com/v1',
+          aiModel: res.settings.aiModel || 'claude_sonet_4.5',
+          telegramApiId: res.settings.telegramApiId || '2040',
+          telegramApiHash: res.settings.telegramApiHash || 'b18441a1ff607e10a989891a5462e627',
+          telegramDeviceModel: res.settings.telegramDeviceModel || 'Desktop',
+          telegramSystemVersion: res.settings.telegramSystemVersion || 'Windows 10',
+          telegramAppVersion: res.settings.telegramAppVersion || 'Telegram Desktop 6.9.3 x64',
+          telegramLangCode: res.settings.telegramLangCode || 'en',
+          telegramSystemLangCode: res.settings.telegramSystemLangCode || 'en-US',
         })
       }
     } catch (e: any) {
@@ -216,7 +234,7 @@ export default function SettingsPage() {
           </div>
 
           <div className="pt-2">
-            <label className="block text-sm font-semibold mb-1.5">3. Webhook URL (Tuỳ chọn Nâng cao)</label>
+            <label className="block text-sm font-semibold mb-1.5">3. Webhook URL</label>
             <div className="flex relative items-center">
               <span className="inline-flex h-[42px] items-center px-3 rounded-l-lg border border-r-0 border-gray-200 bg-gray-100 text-gray-500">
                 <LinkIcon className="w-4 h-4" />
@@ -230,20 +248,119 @@ export default function SettingsPage() {
               />
             </div>
             <p className="text-xs text-gray-400 mt-1.5 max-w-2xl leading-relaxed">
-              Bot ẩn sẽ chạy ở Port <code>3001</code> bên trong App. Nếu bỏ trống, Bot sẽ dùng **Long Polling** mặc định.
+              Webhook đi qua Next.js backend sẵn có ở port <code>3000</code>, endpoint <code>/webhook</code>. Không cần mở thêm port <code>3001</code>.
             </p>
           </div>
 
           <div className="pt-2">
-            <label className="block text-sm font-semibold mb-1.5">4. OpenAI API Key (GPT-4o-mini)</label>
-            <input
-              type="password"
-              placeholder="sk-proj-..."
-              className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              value={form.openaiApiKey}
-              onChange={e => setForm({...form, openaiApiKey: e.target.value})}
-            />
-            <p className="text-xs text-gray-400 mt-1">Dùng để tự động viết lại nội dung mỗi lần gửi (tránh trùng lặp spam).</p>
+            <label className="block text-sm font-semibold mb-1.5">4. Telegram MTProto Client</label>
+            <p className="text-xs text-gray-500 mb-3">
+              Cấu hình này dùng cho đăng nhập OTP, import session và chuyển TData. Đã có sẵn giá trị mặc định, user không cần đổi nếu chưa hiểu rõ.
+            </p>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">API ID</label>
+                <input
+                  type="text"
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.telegramApiId}
+                  onChange={e => setForm({...form, telegramApiId: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">API Hash</label>
+                <input
+                  type="password"
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.telegramApiHash}
+                  onChange={e => setForm({...form, telegramApiHash: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">Device Model</label>
+                <input
+                  type="text"
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.telegramDeviceModel}
+                  onChange={e => setForm({...form, telegramDeviceModel: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">System Version</label>
+                <input
+                  type="text"
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.telegramSystemVersion}
+                  onChange={e => setForm({...form, telegramSystemVersion: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">App Version</label>
+                <input
+                  type="text"
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.telegramAppVersion}
+                  onChange={e => setForm({...form, telegramAppVersion: e.target.value})}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">Lang Code</label>
+                  <input
+                    type="text"
+                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={form.telegramLangCode}
+                    onChange={e => setForm({...form, telegramLangCode: e.target.value})}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 mb-1">System Lang</label>
+                  <input
+                    type="text"
+                    className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={form.telegramSystemLangCode}
+                    onChange={e => setForm({...form, telegramSystemLangCode: e.target.value})}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-2 space-y-3">
+            <label className="block text-sm font-semibold">5. AI API Core</label>
+            <p className="text-xs text-gray-500">Dùng OpenAI-compatible endpoint. Ví dụ custom core: https://.../v1, model claude_sonet_4.5.</p>
+            <div>
+              <label className="block text-xs font-medium text-gray-500 mb-1">AI API URL</label>
+              <input
+                type="text"
+                placeholder="https://api.openai.com/v1"
+                className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                value={form.aiApiUrl}
+                onChange={e => setForm({...form, aiApiUrl: e.target.value})}
+              />
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">AI API Key</label>
+                <input
+                  type="password"
+                  placeholder="hello-im-stondy / sk-..."
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.openaiApiKey}
+                  onChange={e => setForm({...form, openaiApiKey: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 mb-1">AI Model</label>
+                <input
+                  type="text"
+                  placeholder="claude_sonet_4.5"
+                  className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.aiModel}
+                  onChange={e => setForm({...form, aiModel: e.target.value})}
+                />
+              </div>
+            </div>
           </div>
         </div>
 
@@ -270,3 +387,6 @@ export default function SettingsPage() {
     </div>
   )
 }
+
+
+

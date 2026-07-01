@@ -213,20 +213,20 @@ ipcMain.handle("telegram:getAccounts", () => {
 
 ipcMain.handle(
   "telegram:requestLoginCode",
-  async (_, { apiId, apiHash, phone }) => {
+  async (_, { phone }) => {
     const telegramService = require("./telegramService");
     try {
-      return await telegramService.requestLoginCode(apiId, apiHash, phone);
+      return await telegramService.requestLoginCode(phone);
     } catch (e) {
       return { success: false, error: e.message };
     }
   },
 );
 
-ipcMain.handle("telegram:submitLoginCode", async (_, { code, password }) => {
+ipcMain.handle("telegram:submitLoginCode", async (_, { phone, code, phoneCodeHash, password }) => {
   const telegramService = require("./telegramService");
   try {
-    return await telegramService.submitLoginCode(code, password);
+    return await telegramService.submitLoginCode(phone, code, phoneCodeHash, password);
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -234,15 +234,80 @@ ipcMain.handle("telegram:submitLoginCode", async (_, { code, password }) => {
 
 ipcMain.handle(
   "telegram:importSession",
-  async (_, { apiId, apiHash, sessionString }) => {
+  async (_, { sessionString }) => {
     const telegramService = require("./telegramService");
     try {
-      return await telegramService.importSession(apiId, apiHash, sessionString);
+      return await telegramService.importSession(sessionString);
     } catch (e) {
       return { success: false, error: e.message };
     }
   },
 );
+
+ipcMain.handle("telegram:selectDir", async (_, title = 'Chọn thư mục TData') => {
+  const { dialog } = require('electron');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: title,
+    properties: ['openDirectory']
+  });
+  return result.filePaths[0] || null;
+});
+
+ipcMain.handle("telegram:selectFile", async (_, title = 'Chọn file ZIP/7z chứa TData') => {
+  const { dialog } = require('electron');
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: title,
+    properties: ['openFile'],
+    filters: [{ name: 'Telegram Archive Files', extensions: ['zip', '7z'] }]
+  });
+  return result.filePaths[0] || null;
+});
+
+ipcMain.handle("telegram:extractArchive", async (_, { filePath }) => {
+  const extractorService = require("./extractorService");
+  try {
+    extractorService.cleanTemp();
+    const tdataDir = await extractorService.extractArchive(filePath);
+    return { success: true, tdataDir };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle("telegram:scanTdata", async (_, { tdataDir, passcode }) => {
+  const pythonService = require("./pythonService");
+  try {
+    const result = await pythonService.runAction('scan_tdata', { tdata_dir: tdataDir, passcode: passcode || null });
+    return { success: true, data: result };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle("telegram:importTdataSession", async (_, { tdataDir, passcode, accountIndex, password }) => {
+  const pythonService = require("./pythonService");
+  const telegramService = require("./telegramService");
+  try {
+    // 1. Chạy python convert TData sang session string
+    const result = await pythonService.runAction('tdata_to_session', {
+      tdata_dir: tdataDir,
+      passcode: passcode || null,
+      account_index: parseInt(accountIndex) || 0,
+      export_type: 'string',
+      password: password || null
+    });
+    
+    if (result.status !== 'success' || !result.session_string) {
+      return { success: false, error: result.message || 'Không tạo được session string' };
+    }
+    
+    // 2. Gọi importSession để kết nối và lưu vào DB
+    const importRes = await telegramService.importSession(result.session_string);
+    return importRes;
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
 
 ipcMain.handle("telegram:removeAccount", async (_, { accountId }) => {
   const telegramService = require("./telegramService");
@@ -284,13 +349,14 @@ ipcMain.handle("telegram:getForumTopics", async (_, { accountId, chatId }) => {
 
 ipcMain.handle(
   "telegram:getMessages",
-  async (_, { accountId, chatId, limit }) => {
+  async (_, { accountId, chatId, limit, topicId }) => {
     const telegramService = require("./telegramService");
     try {
       const messages = await telegramService.getMessages(
         accountId,
         chatId,
         limit || 30,
+        topicId || null,
       );
       return { success: true, messages };
     } catch (err) {
@@ -298,6 +364,90 @@ ipcMain.handle(
     }
   },
 );
+
+ipcMain.handle("aiLead:scanEngagementGroup", async (_, { accountId, chatId, limit, topicId, topicTitle, purpose }) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return await aiLeadService.scanEngagementGroup({ accountId, chatId, limit, topicId, topicTitle, purpose });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:scanUnreadPrivate", async (_, options = {}) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return await aiLeadService.scanUnreadPrivateMessages(options);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:getQueue", async (_, { filter = {}, limit = 100, page = 1 } = {}) => {
+  try {
+    const AiLeadQueue = require("./models/AiLeadQueue");
+    const paged = await AiLeadQueue.findRecentPaged(filter, { page, limit });
+    return { success: true, list: paged.items, ...paged };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:sendPending", async (_, { id }) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return await aiLeadService.sendPending(id);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:skipPending", async (_, { id }) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return await aiLeadService.skipPending(id);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:editPending", async (_, { id, text }) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return await aiLeadService.editPending(id, text);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:getBlacklist", async () => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return { success: true, list: await aiLeadService.getBlacklist() };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:getBlacklistPaged", async (_, options) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    const result = await aiLeadService.getBlacklistPaged(options);
+    return { success: true, ...result };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:removeFromBlacklist", async (_, { accountId, senderId }) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    const deleted = await aiLeadService.removeFromBlacklist(accountId, senderId);
+    return { success: true, deleted };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
 
 ipcMain.handle(
   "telegram:scanGroupSecurity",
@@ -347,6 +497,15 @@ ipcMain.handle("telegram:sendNow", async (_, payload) => {
   const autoPostService = require("./autoPostService");
   try {
     return await autoPostService.sendNow(payload);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("ai:generateAutoPostContent", async (_, payload) => {
+  const autoPostService = require("./autoPostService");
+  try {
+    return await autoPostService.generateAutoPostContent(payload);
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -772,6 +931,12 @@ app.whenReady().then(async () => {
   const { connectDB } = require("./db");
   await connectDB();
 
+  const StartupSetting = require("./models/Setting");
+  const startupSettings =
+    (await StartupSetting.findOne({ type: "global_app_settings" })) ||
+    new StartupSetting({ type: "global_app_settings" });
+  StartupSetting.applyTelegramClientEnv(startupSettings.toObject());
+
   await initStore();
 
   // Telegram Background Services
@@ -786,10 +951,10 @@ app.whenReady().then(async () => {
   // Start Background Automation Scheduler
   try {
     const PostCampaign = require("./models/PostCampaign");
-    await PostCampaign.updateMany({}, { isRunning: false });
+    await PostCampaign.find();
     const autoPostService = require("./autoPostService");
     autoPostService.start();
-    console.log("[Scheduler] AutoPost Background jobs started and campaigns reset to stopped");
+    console.log("[Scheduler] AutoPost Background jobs started and saved campaign states restored");
   } catch (err) {
     console.warn("[Scheduler] Failed to start:", err.message);
   }
@@ -806,6 +971,10 @@ const GlobalSetting = require("./models/Setting");
 ipcMain.handle("settings:get", async () => {
   try {
     let s = await GlobalSetting.findOne({ type: "global_app_settings" });
+    if (!s) {
+      s = new GlobalSetting({ type: "global_app_settings" });
+      await s.save();
+    }
     if (s && !s.telegramPairToken) {
       s.telegramPairToken =
         "admin_" + Math.random().toString(36).substring(2, 10);
@@ -829,6 +998,17 @@ ipcMain.handle("settings:save", async (_, data) => {
       Object.assign(s, data);
     }
     await s.save();
+    GlobalSetting.applyTelegramClientEnv(s.toObject());
+    try {
+      const telegramService = require("./telegramService");
+      if (s.aiLeadUserReplyEnabled !== false) {
+        telegramService.startAiLeadPrivateInboxWatcher().catch((err) => console.error("[AILead] Watcher start error:", err.message));
+      } else {
+        telegramService.stopAiLeadPrivateInboxWatcher();
+      }
+    } catch (watcherErr) {
+      console.error("[AILead] Watcher apply error:", watcherErr.message);
+    }
     return {
       success: true,
       settings: typeof s.toObject === "function" ? s.toObject() : s,
@@ -851,3 +1031,5 @@ ipcMain.handle("bot:restart", async () => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+

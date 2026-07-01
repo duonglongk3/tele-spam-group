@@ -6,7 +6,7 @@ export const metadata: Metadata = {
   description: 'Pro Telegram Auto Post Desktop Application',
 }
 
-import { Toaster } from 'sonner'
+import { AppToaster } from '@/components/ui/AppToaster'
 
 export default function RootLayout({
   children,
@@ -25,7 +25,7 @@ export default function RootLayout({
       </head>
       <body>
         {children}
-        <Toaster position="top-right" richColors />
+        <AppToaster />
       </body>
     </html>
   )

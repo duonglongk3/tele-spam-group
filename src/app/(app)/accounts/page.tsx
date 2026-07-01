@@ -3,7 +3,8 @@
 import { useState, useEffect } from "react"
 import { 
   Users2, Plus, Trash2, Phone, ShieldCheck, KeyRound, 
-  Import, ArrowLeft, CheckCircle, Edit, X, BookOpen, Image, Trash
+  Import, ArrowLeft, CheckCircle, Edit, X, BookOpen, Image, Trash,
+  FolderOpen, Archive
 } from "lucide-react"
 import { telegramApi } from "@/lib/telegram"
 import { toast } from "sonner"
@@ -13,7 +14,7 @@ function Card({ children, className = '', ...rest }: React.HTMLAttributes<HTMLDi
   return <div className={`bg-white rounded-xl border border-gray-200 shadow-sm ${className}`} {...rest}>{children}</div>;
 }
 
-type ViewMode = 'list' | 'add-otp' | 'add-session'
+type ViewMode = 'list' | 'add-otp' | 'add-session' | 'add-tdata'
 
 export default function AccountsPage() {
   const [accounts, setAccounts] = useState<any[]>([])
@@ -24,11 +25,20 @@ export default function AccountsPage() {
   const [code, setCode] = useState('')
   const [password, setPassword] = useState('')
   const [otpStep, setOtpStep] = useState(1)
-  const [apiId, setApiId] = useState('')
-  const [apiHash, setApiHash] = useState('')
+  const [phoneCodeHash, setPhoneCodeHash] = useState('')
+
 
   // Import Session
   const [sessionStr, setSessionStr] = useState('')
+
+  // Import TData
+  const [tdataDir, setTdataDir] = useState('')
+  const [tdataPasscode, setTdataPasscode] = useState('')
+  const [tdataPassword, setTdataPassword] = useState('')
+  const [archivePath, setArchivePath] = useState('')
+  const [scanResult, setScanResult] = useState<any>(null)
+  const [selectedAccIndex, setSelectedAccIndex] = useState(0)
+  const [tdataMode, setTdataMode] = useState<'dir' | 'archive'>('archive')
 
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -65,15 +75,13 @@ export default function AccountsPage() {
 
   // ─── OTP LOGIN ──────────────────────────────────────
   const handleRequestCode = async () => {
-    if (!apiId.trim() || !apiHash.trim()) {
-      setError('Vui lòng nhập API ID và API Hash theo hướng dẫn ở trên');
-      return;
-    }
     setError(''); setLoading(true)
     try {
-      const res = await telegramApi.requestLoginCode(apiId, apiHash, phone)
-      if (res?.success) { setOtpStep(2) }
-      else { setError(res?.error || 'Lỗi gửi mã') }
+      const res = await telegramApi.requestLoginCode(phone)
+      if (res?.success && res.phoneCodeHash) {
+        setPhoneCodeHash(res.phoneCodeHash)
+        setOtpStep(2)
+      } else { setError(res?.error || 'Lỗi gửi mã') }
     } catch (e: any) { setError(e.message) }
     finally { setLoading(false) }
   }
@@ -81,7 +89,7 @@ export default function AccountsPage() {
   const handleSubmitCode = async () => {
     setError(''); setLoading(true)
     try {
-      const res = await telegramApi.submitLoginCode(code, password)
+      const res = await telegramApi.submitLoginCode(phone, phoneCodeHash, code, password)
       if (res?.success) {
         resetForm(); loadAccounts()
       } else if (res?.error?.includes('SESSION_PASSWORD_NEEDED')) {
@@ -96,9 +104,7 @@ export default function AccountsPage() {
     if (!sessionStr.trim()) return
     setError(''); setLoading(true)
     try {
-      const fbId = apiId.trim() || '2040';
-      const fbHash = apiHash.trim() || 'b18441a1ff607e10a989891a5462e627';
-      const res = await telegramApi.importSession(fbId, fbHash, sessionStr.trim())
+      const res = await telegramApi.importSession(sessionStr.trim())
       if (res?.success) {
         resetForm(); loadAccounts()
       } else { setError(res?.error || 'Session không hợp lệ') }
@@ -106,8 +112,99 @@ export default function AccountsPage() {
     finally { setLoading(false) }
   }
 
+  // ─── IMPORT TDATA ───────────────────────────────────
+  const handleSelectTdataDir = async () => {
+    setError('')
+    setScanResult(null)
+    setTdataDir('')
+    try {
+      const dir = await telegramApi.selectDir('Chọn thư mục TData')
+      if (dir) {
+        setTdataDir(dir)
+        await handleScanTdata(dir, tdataPasscode)
+      }
+    } catch (e: any) {
+      setError(e.message)
+    }
+  }
+
+  const handleSelectTdataArchive = async () => {
+    setError('')
+    setScanResult(null)
+    setTdataDir('')
+    setArchivePath('')
+    try {
+      const file = await telegramApi.selectFile('Chọn file ZIP/7z chứa TData')
+      if (file) {
+        setArchivePath(file)
+        setLoading(true)
+        toast.info('Đang giải nén file TData, vui lòng chờ...')
+        const res = await telegramApi.extractArchive(file)
+        setLoading(false)
+        if (res?.success) {
+          setTdataDir(res.tdataDir)
+          toast.success('Giải nén thành công!')
+          await handleScanTdata(res.tdataDir, tdataPasscode)
+        } else {
+          setError(res?.error || 'Giải nén thất bại')
+        }
+      }
+    } catch (e: any) {
+      setLoading(false)
+      setError(e.message)
+    }
+  }
+
+  const handleScanTdata = async (dirPath: string, code: string) => {
+    setError('')
+    setLoading(true)
+    try {
+      const res = await telegramApi.scanTdata(dirPath, code)
+      if (res?.success) {
+        setScanResult(res.data)
+        if (res.data?.accounts_count > 0) {
+          setSelectedAccIndex(0)
+        }
+      } else {
+        setError(res?.error || 'Không thể đọc dữ liệu TData. Có thể thư mục không đúng hoặc cần mật khẩu giải mã.')
+      }
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleImportTdata = async () => {
+    if (!tdataDir) return
+    setError('')
+    setLoading(true)
+    try {
+      toast.info('Đang bắt đầu import tài khoản Telegram...')
+      const res = await telegramApi.importTdataSession(
+        tdataDir,
+        tdataPasscode || null,
+        selectedAccIndex,
+        tdataPassword || undefined
+      )
+      if (res?.success) {
+        toast.success('Import tài khoản thành công!')
+        resetForm()
+        loadAccounts()
+      } else {
+        setError(res?.error || 'Không thể import tài khoản')
+      }
+    } catch (e: any) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const resetForm = () => {
     setView('list'); setOtpStep(1); setPhone(''); setCode(''); setPassword(''); setSessionStr(''); setError('')
+    setTdataDir(''); setTdataPasscode(''); setTdataPassword(''); setArchivePath(''); setScanResult(null); setSelectedAccIndex(0)
+    setPhoneCodeHash('')
   }
 
   const handleRemove = async (id: string) => {
@@ -115,9 +212,13 @@ export default function AccountsPage() {
       action: {
         label: 'Đồng ý',
         onClick: async () => {
-          await telegramApi.removeAccount(id);
+          const res = await telegramApi.removeAccount(id);
           loadAccounts();
-          toast.success("Xoá tài khoản thành công");
+          if (res?.success) {
+            toast.success(res.loggedOut ? "Đã đăng xuất session và xoá tài khoản" : "Đã xoá tài khoản, nhưng không thể đăng xuất session từ Telegram vì session không còn kết nối");
+          } else {
+            toast.error("Xoá tài khoản thất bại: " + (res?.error || "Không rõ lỗi"));
+          }
         }
       },
       cancel: { label: 'Hủy', onClick: () => {} }
@@ -274,7 +375,7 @@ export default function AccountsPage() {
   }
 
   // ─── RENDER: Thêm tài khoản ─────────────────────────
-  if (view === 'add-otp' || view === 'add-session') {
+  if (view === 'add-otp' || view === 'add-session' || view === 'add-tdata') {
     return (
       <div className="p-6 md:p-8 max-w-lg mx-auto space-y-6 fade-in">
         <button onClick={resetForm} className="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-900 transition-colors">
@@ -287,41 +388,20 @@ export default function AccountsPage() {
 
         <div className="flex bg-gray-100 p-1 rounded-lg">
           <button onClick={() => { setView('add-otp'); setError('') }}
-            className={`flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-md text-sm font-medium transition-all ${view === 'add-otp' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}>
-            <Phone className="w-4 h-4" /> Đăng nhập OTP
+            className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${view === 'add-otp' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}>
+            <Phone className="w-3.5 h-3.5 inline mr-1" /> Đăng nhập OTP
           </button>
           <button onClick={() => { setView('add-session'); setError('') }}
-            className={`flex-1 flex items-center justify-center gap-2 py-2 px-4 rounded-md text-sm font-medium transition-all ${view === 'add-session' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}>
-            <Import className="w-4 h-4" /> Import Session
+            className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${view === 'add-session' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}>
+            <Import className="w-3.5 h-3.5 inline mr-1" /> Import Session
+          </button>
+          <button onClick={() => { setView('add-tdata'); setError('') }}
+            className={`flex-1 flex items-center justify-center gap-2 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${view === 'add-tdata' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}>
+            <FolderOpen className="w-3.5 h-3.5 inline mr-1" /> Import TData
           </button>
         </div>
 
-        {/* API Config (Dùng chung cho cả OTP và Import) */}
-        <Card className="p-5 space-y-3 bg-blue-50/50">
-          <div>
-            <h3 className="text-sm font-semibold text-blue-800 flex items-center gap-2">
-              <KeyRound className="w-4 h-4" /> Cấu hình API Telegram
-            </h3>
-            <p className="text-xs text-gray-600 mt-1.5 leading-relaxed">
-              Bạn cần cung cấp cấu hình <b>API ID</b> và <b>API Hash</b> (tuỳ chọn hoặc dùng app ID mặc định).
-              Có thể lấy tại <a href="https://my.telegram.org" target="_blank" className="text-blue-600 hover:underline font-medium">my.telegram.org</a>.
-            </p>
-          </div>
-          <div className="grid grid-cols-2 gap-3 mt-3">
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">API ID (*)</label>
-              <input value={apiId} onChange={e => setApiId(e.target.value)} 
-                placeholder="VD: 2040"
-                className="w-full p-2.5 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none" />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">API Hash (*)</label>
-              <input value={apiHash} onChange={e => setApiHash(e.target.value)} 
-                placeholder="VD: b18441a1ff..."
-                className="w-full p-2.5 border rounded-lg text-sm bg-white focus:ring-2 focus:ring-blue-100 outline-none" />
-            </div>
-          </div>
-        </Card>
+
 
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm flex items-center gap-2">
@@ -410,6 +490,114 @@ export default function AccountsPage() {
               <Import className="w-4 h-4" />
               {loading ? 'Đang kết nối...' : 'Import Tài Khoản'}
             </button>
+          </Card>
+        )}
+
+        {view === 'add-tdata' && (
+          <Card className="p-5 space-y-4 shadow-md border-blue-100">
+            <div className="flex bg-gray-50 p-1 rounded-lg border">
+              <button type="button" onClick={() => { setTdataMode('archive'); setError(''); setScanResult(null); setTdataDir('') }}
+                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${tdataMode === 'archive' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}>
+                <Archive className="w-3.5 h-3.5 inline mr-1" /> File Nén (.zip / .7z)
+              </button>
+              <button type="button" onClick={() => { setTdataMode('dir'); setError(''); setScanResult(null); setTdataDir('') }}
+                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-semibold transition-all ${tdataMode === 'dir' ? 'bg-white shadow-sm text-blue-600' : 'text-gray-500'}`}>
+                <FolderOpen className="w-3.5 h-3.5 inline mr-1" /> Thư Mục TData
+              </button>
+            </div>
+
+            {tdataMode === 'archive' && (
+              <div className="space-y-3">
+                <label className="block text-sm font-medium text-gray-700">Chọn file ZIP/7z chứa TData</label>
+                <div className="flex gap-2">
+                  <input readOnly value={archivePath} placeholder="Chưa chọn file..." 
+                    className="flex-1 p-2.5 border rounded-lg text-sm bg-gray-50 outline-none truncate" />
+                  <button onClick={handleSelectTdataArchive} disabled={loading}
+                    className="bg-gray-100 hover:bg-gray-200 border text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
+                    Chọn File
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {tdataMode === 'dir' && (
+              <div className="space-y-3">
+                <label className="block text-sm font-medium text-gray-700">Đường dẫn thư mục TData</label>
+                <div className="flex gap-2">
+                  <input readOnly value={tdataDir} placeholder="Chưa chọn thư mục..." 
+                    className="flex-1 p-2.5 border rounded-lg text-sm bg-gray-50 outline-none truncate" />
+                  <button onClick={handleSelectTdataDir} disabled={loading}
+                    className="bg-gray-100 hover:bg-gray-200 border text-gray-700 px-4 py-2 rounded-lg text-sm font-semibold transition-colors">
+                    Chọn Thư Mục
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {tdataDir && (
+              <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg text-xs space-y-1 text-blue-800">
+                <p className="font-semibold text-blue-900">Đã nhận diện TData:</p>
+                <p className="truncate font-mono">{tdataDir}</p>
+              </div>
+            )}
+
+            {scanResult && (
+              <div className="space-y-3 pt-2 border-t">
+                {scanResult.accounts_count > 0 ? (
+                  <>
+                    <div className="bg-green-50 text-green-700 p-3 rounded-lg text-sm flex items-center gap-2">
+                      <CheckCircle className="w-4 h-4 shrink-0" />
+                      Tìm thấy <b>{scanResult.accounts_count}</b> tài khoản trong TData!
+                    </div>
+                    
+                    {scanResult.accounts_count > 1 && (
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700 mb-1">Chọn tài khoản muốn Import:</label>
+                        <select value={selectedAccIndex} onChange={e => setSelectedAccIndex(parseInt(e.target.value))}
+                          className="w-full p-2 border rounded-lg text-sm bg-white outline-none">
+                          {scanResult.accounts.map((acc: any) => (
+                            <option key={acc.index} value={acc.index}>
+                              Tài khoản #{acc.index + 1} {acc.phone ? `(SĐT: +${acc.phone})` : ''} {acc.user_id ? `(ID: ${acc.user_id})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Mật khẩu 2FA (Nếu tài khoản có bật 2FA):</label>
+                      <input type="password" value={tdataPassword} onChange={e => setTdataPassword(e.target.value)} placeholder="Nhập mật khẩu 2FA..."
+                        className="w-full p-2.5 border rounded-lg text-sm bg-white outline-none" />
+                    </div>
+
+                    <button 
+                      onClick={handleImportTdata} disabled={loading}
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white py-2.5 rounded-lg font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                      <Import className="w-4 h-4" />
+                      {loading ? 'Đang Import...' : 'Import Tài Khoản Này'}
+                    </button>
+                  </>
+                ) : (
+                  <div className="bg-yellow-50 text-yellow-800 p-3 rounded-lg text-sm">
+                    Không tìm thấy tài khoản nào. Có thể TData trống hoặc bị khóa.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tdataDir && (!scanResult || scanResult?.accounts_count === 0) && (
+              <div className="space-y-3 pt-2 border-t">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Mật khẩu giải mã TData (Passcode) - Nếu có:</label>
+                  <input type="password" value={tdataPasscode} onChange={e => setTdataPasscode(e.target.value)} placeholder="Nhập passcode..."
+                    className="w-full p-2.5 border rounded-lg text-sm bg-white outline-none" />
+                </div>
+                <button onClick={() => handleScanTdata(tdataDir, tdataPasscode)} disabled={loading}
+                  className="w-full bg-gray-700 hover:bg-gray-800 text-white py-2.5 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50">
+                  {loading ? 'Đang quét lại...' : 'Thử lại / Quét với Passcode'}
+                </button>
+              </div>
+            )}
           </Card>
         )}
       </div>
