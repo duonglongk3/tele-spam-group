@@ -37,8 +37,10 @@ const accountDailyCounts = new Map();
 const groupDailyCounts = new Map();
 const groupCooldowns = new Map();
 const userCooldowns = new Map();
-let autoSendQueueTimer = null;
-let autoSendQueueRunning = false;
+let autoSendQueueEnabled = true;
+const groupTimers = new Map();
+const groupRunning = new Set();
+const groupScheduleChains = new Map();
 const senderProfileTextCache = new Map();
 const botLikeUserNotifyKeys = new Set();
 
@@ -272,6 +274,28 @@ function isTelegramBotLikeUsername(value) {
   const username = normalizeTelegramUsername(value);
   if (!username) return false;
   return /_bot$/i.test(username);
+}
+
+function isToxicOrAbusive(text) {
+  if (!text) return false;
+  const clean = text.toLowerCase().trim();
+  const toxicPatterns = [
+    /\bkys\b/i,
+    /\bfag(got|ged)?s?\b/i,
+    /\bnigg(er|a)s?\b/i,
+    /\bretard(ed)?s?\b/i,
+    /\bcunt(s)?\b/i,
+    /\b(bitch|whore|slut)s?\b/i,
+    /\b(asshole|dickhead)s?\b/i,
+    /\bmotherfucker\b/i,
+  ];
+
+  for (const pattern of toxicPatterns) {
+    if (pattern.test(clean)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function getTelegramUsernamesFromText(text) {
@@ -738,13 +762,8 @@ async function hasRecentSimilarReply(accountId, chatId, reply) {
   const fingerprint = normalizeReplyFingerprint(reply);
   if (!fingerprint) return false;
   const opening = getReplyOpening(reply);
-  const recent = await AiLeadQueue.findRecent({}, 80).catch(() => []);
+  const recent = await AiLeadQueue.findRecent({ accountId, chatId }, 50).catch(() => []);
   return recent.some((item) => {
-    if (
-      String(item.accountId) !== String(accountId) ||
-      String(item.chatId) !== String(chatId)
-    )
-      return false;
     const existingFingerprint = normalizeReplyFingerprint(item.suggestedReply);
     if (!existingFingerprint) return false;
     return (
@@ -771,6 +790,7 @@ async function buildCompactMessagesForAi({
     const text = String(msg.text || "").trim();
     if (!text || text.length < 4 || msg.hasMedia) continue;
     if (shouldIgnoreBotLikeUser(settings, msg, text) || isBotLikeSellerAdText(text)) continue;
+    if (isToxicOrAbusive(text)) continue;
 
     const senderId = msg.fromId?.toString() || msg.senderId?.toString() || "";
     if (senderId && blockedSenderIds.has(senderId)) {
@@ -1103,13 +1123,16 @@ async function askAi({
   purpose = "",
 }) {
   const playbook = getTelegramBotRolePrompt();
-
   const roleInstruction = `
-[ROLE: UNDERCOVER MMO EXPERT & ONLINE SELLER]
+[ROLE: UNDERCOVER MMO EXPERT, DISCUSSANT & ACTIVE BUYER WITH CURIOSITY HOOK]
 - You are participating in a PUBLIC TELEGRAM GROUP chat.
-- Act as an experienced MMO practitioner or online seller sharing tips.
-- Your goal is to blend into the market chat and softly promote our shop-bot solution when the configured purpose is promotion.
-- Only reply when it sounds like a real seller/operator would reply. Do not behave like a buyer asking for stock, warranty, price, or delivery unless the user directly asked you.
+- Act as an experienced MMO practitioner, discussant, or an active buyer/wholesale importer looking for deals.
+- Your ultimate goal is to generate interest in automated shop-bots (teleshopbot.com / Payment Hub) by creating curiosity (Curiosity Loop).
+- IMPORTANT ROLE RULES:
+  1. You are ONLY a Buyer or a Discussant in these public chats. You NEVER act as a Seller of game accounts/items.
+  2. You are looking to buy accounts/items from other sellers, or answering questions/sharing tips about payments, bots, and shop operations.
+  3. When acting as a buyer, vary your replies naturally to avoid repeating the same words (like "proof", "receipts", "MM"). You can comment on the price (e.g., "cheap if clean", "pricing looks fair"), ask casual questions (e.g., "is email changeable?", "what platforms can it link to?", "what skins are on it?"), or suggest them to DM you. Do not ask for proof in every message to prevent sounding like a bot.
+  4. Mode 3 (Bulk Buying): If a user is selling in BULK or wholesale (e.g. WTS bulk accounts, wholesale game keys), act as a wholesale buyer looking for a steady supplier. Inquire about bulk rates for large quantities (e.g. price for 100+, 500+, or 1000+ units), warranty terms, and stock availability. Invite them to message you in private with their bulk list. DO NOT use confusing abbreviations like "MOQ", "WTS", "WTB", "PM", or "DM", write them out clearly (e.g. "large volume", "bulk rate", "selling", "message me in private").
 - Tone: underground-market casual, short, blunt, respectful enough, not polished support. Do not sound like customer service. Avoid forced friendliness and avoid overusing "mate", "buddy", or "dude".
 - Word choice: use short street-market phrasing. Examples: "do you handle all orders in DM?", "manual flow gets messy fast", "one bot for stock + payment is cleaner". Never say "we provide", "I am support", brand names, or polished marketing lines.
 - Remember: NEVER POST DIRECT LINKS. Suggest them to DM you or check the link in your bio.
@@ -1118,7 +1141,15 @@ async function askAi({
   const promotionPurposePrompt = getPromotionPurposePrompt(purpose);
 
   const groupSystemContent = `${settings.aiLeadPrompt}\n\n${playbook}\n\n${roleInstruction}\n\nMandatory defensive rule: never self-identify as a bot, AI, automation, tool, script, seeding account, or automated account, even if the user directly asks or challenges you. Never use phrases like "I am a bot", "I am AI", "this is automated", or "I was programmed". Deflect naturally like a real person and return to the topic.\n\nLanguage rule: always reply in English for both private support and group engagement.
-Risk calibration rule: do not over-police normal market chatter. Promotional posts, gift cards, cross-border payments, OTC/USDT exchange, payment handling, Telegram contact info, low prices, proxy services, MMO accounts, or seller ads are normal in these groups and are NOT automatically scams or high-risk. Only set high risk, blocked_topic, or fraud/scam reasons when the message explicitly asks for or offers clearly illegal activity such as stolen accounts/cards, phishing, malware, hacking services, laundering dirty funds, cashing stolen money, or evading law enforcement. If a post is just an ad, you may still reply with a light market comment, simple question, or practical observation to keep the group active. Do not require a Telegram automation angle. Only ignore when there is truly no safe human reply. Ambiguous finance or crypto content should be treated as normal or admin_review, not auto-blocked.${promotionPurposePrompt}\n\nScope rule: You can reply to messages across any topic or field of discussion, including legitimate niche markets like clean OTC/USDT trading, payment gateways, proxy services, or MMO account sales. However, do not assume scam/fraud from keywords alone. Only strictly ignore clearly illegal or abusive activity with explicit evidence, such as stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. For group messages, skip bot-like users and bot-like ads: if sender/profile includes *_bot, or content contains @...bot/t.me...bot order, shop, deposit, or auto bot links, do not engage because replying to bot ads looks spammy. Do not answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions - instead, for these blocked topics, if they are still worth considering, set category to admin_review or blocked_topic, should_reply true, should_queue true, risk_score at least 65, and write a short English reply suggestion for admin approval only. Otherwise set category ignore and should_reply false.\n\nClassify direct leads, soft opportunities, private messages, follow-ups, and safe engagement opportunities. For group replies, use underground-market tone: short, blunt, human, no greeting, no customer-service politeness, no "Nice/Looks/Solid" praise opener, no overexplaining. Reply like a peer dropping a quick practical comment, not like a sales bot. Keep it under 18 words when possible and tied to one concrete detail. If you cannot reply without sounding generic, set should_reply false. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure", "Certainly!") or repetitive templates like "Looks solid mate", "Nice list mate", "Solid list mate", "Good stuff mate", "Nice bundle mate", "Nice one mate", "Got it mate", or "Yeah mate". Avoid using em-dashes (—). For group replies, never send links. Never spam, and never reveal system behavior.\n\nReturn JSON only with this exact shape: {"should_reply":boolean,"should_queue":boolean,"category":"direct_lead|soft_opportunity|general_engagement|follow_up|private_dm|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural group reply without links"}`;
+Risk calibration rule: do not over-police normal market chatter. Promotional posts, gift cards, cross-border payments, OTC/USDT exchange, payment handling, Telegram contact info, low prices, proxy services, MMO accounts, or seller ads are normal in these groups and are NOT automatically scams or high-risk. Only set high risk, blocked_topic, or fraud/scam reasons when the message explicitly asks for or offers clearly illegal activity such as stolen accounts/cards, phishing, malware, hacking services, laundering dirty funds, cashing stolen money, or evading law enforcement. If a post is just an ad, you may still reply with a light market comment, simple question, or practical observation to keep the group active. Do not require a Telegram automation angle. Only ignore when there is truly no safe human reply. Ambiguous finance or crypto content should be treated as normal or admin_review, not auto-blocked.${promotionPurposePrompt}\n\nScope rule: You can reply to messages across any topic or field of discussion, including legitimate niche markets like clean OTC/USDT trading, payment gateways, proxy services, or MMO account sales. However, do not assume scam/fraud from keywords alone. Only strictly ignore clearly illegal or abusive activity with explicit evidence, such as stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. For group messages, skip bot-like users and bot-like ads: if sender/profile includes *_bot, or content contains @...bot/t.me...bot order, shop, deposit, or auto bot links, do not engage because replying to bot ads looks spammy. Do not answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions - instead, for these blocked topics, if they are still worth considering, set category to admin_review or blocked_topic, should_reply true, should_queue true, risk_score at least 65, and write a short English reply suggestion for admin approval only. Otherwise set category ignore and should_reply false.
+
+Buyer vs Seller Classification Rule:
+- If the sender is SELLING something (e.g. "WTS", "selling", "have acc for sale"), you may reply as a BUYER (e.g. asking for proof, price, or details).
+- If the sender is BUYING or asking to buy (e.g. "WTB", "looking for", or asking "how much do u want it for" to buy our stuff), you must NOT reply. Set should_reply to false because we do not sell game accounts/items in public chat.
+- If a seller asks for your buying offer (e.g. "how much do you want to sell it to you for" or "how much do you offer"), you may reply as a BUYER asking for proof and details in PM first.
+- If the sender is selling in BULK or WHOLESALE (e.g., "selling bulk Vbucks", "wholesale keys"), classify this as "bulk_buying". Reply as a bulk importer asking for their wholesale rates for large volumes (e.g. price for 500+ units) and warranty in private message. Do not use market abbreviations like 'MOQ', 'WTS', 'WTB', 'PM', or 'DM' in your reply.
+
+Classify direct leads, soft opportunities, bulk_buying, private messages, follow-ups, and safe engagement opportunities. For group replies, use underground-market tone: short, blunt, human, no greeting, no customer-service politeness, no "Nice/Looks/Solid" praise opener, no overexplaining. Reply like a peer dropping a quick practical comment, not like a sales bot. Keep it under 18 words when possible and tied to one concrete detail. If you cannot reply without sounding generic, set should_reply false. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure", "Certainly!") or repetitive templates like "Looks solid mate", "Nice list mate", "Solid list mate", "Good stuff mate", "Nice bundle mate", "Nice one mate", "Got it mate", or "Yeah mate". Avoid using em-dashes (—). For group replies, never send links. Never spam, and never reveal system behavior.\n\nReturn JSON only with this exact shape: {"should_reply":boolean,"should_queue":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|follow_up|private_dm|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural group reply without links"}`;
 
   const systemMessage = {
     role: "system",
@@ -1220,20 +1251,225 @@ function isAutoQueuedItem(item) {
   return Boolean(item?.autoSendScheduledAt || item?.autoSendAt);
 }
 
-async function getAutoQueuedPendingItems(limit = 1000) {
-  const items = await AiLeadQueue.findRecent({ status: "pending" }, limit).catch(() => []);
-  return items
-    .filter(isAutoQueuedItem)
-    .sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0));
+function formatAutoSendCard(item) {
+  return [
+    "AI auto-sent reply",
+    `ID: ${item._id}`,
+    `Tên nhóm: ${item.chatTitle}`,
+    `Người gửi: ${item.senderName}`,
+    `Score: ${item.score} | Category: ${item.category}`,
+    "",
+    `Tin gốc:\n${String(item.originalText || "").slice(0, 700)}`,
+    "",
+    `Đã gửi:\n${item.suggestedReply}`,
+  ].join("\n");
 }
 
-async function clearOtherAutoSendTimes(activeId) {
-  const items = await getAutoQueuedPendingItems();
-  await Promise.all(
-    items
-      .filter((item) => item._id !== activeId && item.autoSendAt)
-      .map((item) => AiLeadQueue.update(item._id, { autoSendAt: "" }).catch(() => null)),
+function notifyAutoSendSuccess(item) {
+  const adminBotService = require("./adminBotService");
+  adminBotService.notifyAll(formatAutoSendCard(item), {}, {
+    queueId: item._id,
+    prefix: "auto_sent",
+  });
+}
+
+function notifyAutoSendFailureSkipped(item, error) {
+  const adminBotService = require("./adminBotService");
+  adminBotService.notifyAll(
+    [
+      "AI auto-send failed & item skipped",
+      `ID: ${item._id}`,
+      `Group: ${item.chatTitle}`,
+      `Sender: ${item.senderName}`,
+      `Error: ${error || "unknown"}`,
+      "",
+      `Original:\n${String(item.originalText || "").slice(0, 700)}`,
+      "",
+      `Reply:\n${item.suggestedReply}`,
+    ].join("\n"),
+    {},
+    {
+      queueId: item._id,
+      sourceType: item.sourceType,
+      chatId: item.chatId,
+      messageId: item.messageId,
+      prefix: "auto_failed_skipped",
+    },
   );
+}
+
+async function getPendingItemsForGroup(accountId, chatId, limit = 50000) {
+  const filter = { status: "pending", accountId };
+  if (chatId) {
+    filter.chatId = chatId;
+    filter.sourceType = "group";
+  } else {
+    filter.sourceType = "private";
+  }
+  const items = await AiLeadQueue.findRecent(filter, limit).catch(() => []);
+  return items
+    .filter(isAutoQueuedItem)
+    .sort((a, b) => {
+      const aTime = Date.parse(a.autoSendScheduledAt || a.createdAt || "");
+      const bTime = Date.parse(b.autoSendScheduledAt || b.createdAt || "");
+      return aTime - bTime;
+    });
+}
+
+async function clearGroupOtherSendTimes(groupKey, activeId) {
+  const [accountId, chatId] = groupKey.split(":");
+  const isPrivate = chatId === "private";
+  const items = await getPendingItemsForGroup(accountId, isPrivate ? "" : chatId, 50000);
+  const targets = items.filter((item) => item._id !== activeId && item.autoSendAt);
+  for (const item of targets) {
+    await AiLeadQueue.update(item._id, { autoSendAt: "" }).catch(() => null);
+  }
+}
+
+function scheduleGroupAutoSend(groupKey, settings, options = {}) {
+  if (!groupScheduleChains.has(groupKey)) {
+    groupScheduleChains.set(groupKey, Promise.resolve());
+  }
+  const chain = groupScheduleChains.get(groupKey);
+  const nextChain = chain
+    .catch(() => null)
+    .then(() => scheduleGroupAutoSendOnce(groupKey, settings, options));
+  groupScheduleChains.set(groupKey, nextChain);
+  return nextChain;
+}
+
+async function scheduleGroupAutoSendOnce(groupKey, settings, options = {}) {
+  if (groupTimers.has(groupKey)) {
+    clearTimeout(groupTimers.get(groupKey));
+    groupTimers.delete(groupKey);
+  }
+  if (groupRunning.has(groupKey)) return;
+  if (!autoSendQueueEnabled) return;
+
+  const [accountId, chatId] = groupKey.split(":");
+  const isPrivate = chatId === "private";
+
+  const items = await getPendingItemsForGroup(accountId, isPrivate ? "" : chatId, 50000);
+  if (!items.length) return;
+
+  const now = Date.now();
+  // Tìm item quá hạn gửi
+  const due = items
+    .filter((item) => item.autoSendAt && Date.parse(item.autoSendAt) <= now)
+    .sort((a, b) => Date.parse(a.autoSendAt) - Date.parse(b.autoSendAt))[0];
+
+  if (due) {
+    await clearGroupOtherSendTimes(groupKey, due._id);
+    const timer = setTimeout(() => processGroupAutoSendQueue(groupKey), 0);
+    groupTimers.set(groupKey, timer);
+    console.log(`[AILead-Group] Group ${groupKey} due item ready:`, due._id);
+    return;
+  }
+
+  // Tìm item đã có lịch trong tương lai
+  const scheduled = items
+    .filter((item) => item.autoSendAt && Date.parse(item.autoSendAt) > now)
+    .sort((a, b) => Date.parse(a.autoSendAt) - Date.parse(b.autoSendAt))[0];
+
+  if (scheduled) {
+    await clearGroupOtherSendTimes(groupKey, scheduled._id);
+    const timer = setTimeout(
+      () => processGroupAutoSendQueue(groupKey),
+      Math.max(0, Date.parse(scheduled.autoSendAt) - now),
+    );
+    groupTimers.set(groupKey, timer);
+    console.log(`[AILead-Group] Group ${groupKey} scheduled next item at:`, scheduled.autoSendAt);
+    return;
+  }
+
+  // Item mới chưa gán autoSendAt. Dùng delayMs
+  const next = items[0];
+  const delayMs =
+    options.forceDelayMs !== undefined
+      ? options.forceDelayMs
+      : getRandomAutoSendDelayMs(settings);
+  const autoSendAt = new Date(Date.now() + delayMs).toISOString();
+
+  await AiLeadQueue.update(next._id, { autoSendAt, autoSendError: "" });
+  await clearGroupOtherSendTimes(groupKey, next._id);
+
+  const timer = setTimeout(() => processGroupAutoSendQueue(groupKey), delayMs);
+  groupTimers.set(groupKey, timer);
+  console.log(`[AILead-Group] Group ${groupKey} scheduled new item:`, {
+    queueId: next._id,
+    delayMs,
+    autoSendAt,
+  });
+}
+
+async function processGroupAutoSendQueue(groupKey) {
+  if (groupRunning.has(groupKey)) return;
+  groupRunning.add(groupKey);
+  groupTimers.delete(groupKey);
+
+  let settings = null;
+  let activeAutoSendItem = null;
+  let sendSuccess = false;
+  try {
+    settings =
+      (await GlobalSetting.findOne({ type: "global_app_settings" })) ||
+      new GlobalSetting();
+    const [accountId, chatId] = groupKey.split(":");
+    const isPrivate = chatId === "private";
+
+    const now = Date.now();
+    const items = await getPendingItemsForGroup(accountId, isPrivate ? "" : chatId, 50000);
+    const item = items
+      .filter(
+        (entry) => entry.autoSendAt && Date.parse(entry.autoSendAt) <= now,
+      )
+      .sort((a, b) => Date.parse(a.autoSendAt) - Date.parse(b.autoSendAt))[0];
+
+    if (!item) return;
+    activeAutoSendItem = item;
+
+    await clearGroupOtherSendTimes(groupKey, item._id);
+    await AiLeadQueue.update(item._id, {
+      autoSendAttempts: Number(item.autoSendAttempts || 0) + 1,
+      autoSendError: "",
+    });
+
+    const result = await sendPending(item._id, { source: "auto_queue" });
+    if (result?.success) {
+      sendSuccess = true;
+    } else {
+      const error = result?.error || "Auto-send failed";
+      await AiLeadQueue.update(item._id, {
+        status: "skipped",
+        skippedAt: new Date().toISOString(),
+        autoSendAt: "",
+        autoSendScheduledAt: "",
+        autoSendError: error,
+      });
+      notifyAutoSendFailureSkipped(item, error);
+    }
+    await clearGroupOtherSendTimes(groupKey, item._id);
+  } catch (err) {
+    console.error(`[AILead-Group] Group ${groupKey} auto-send error:`, err.message);
+    if (activeAutoSendItem) {
+      await AiLeadQueue.update(activeAutoSendItem._id, {
+        status: "skipped",
+        skippedAt: new Date().toISOString(),
+        autoSendAt: "",
+        autoSendScheduledAt: "",
+        autoSendError: err.message || "Auto-send failed",
+      }).catch(() => null);
+      notifyAutoSendFailureSkipped(activeAutoSendItem, err.message || "Auto-send failed");
+    }
+  } finally {
+    groupRunning.delete(groupKey);
+    const forceDelayMs = sendSuccess ? undefined : 5000;
+    scheduleGroupAutoSend(groupKey, settings || new GlobalSetting(), {
+      forceDelayMs,
+    }).catch((err) => {
+      console.error(`[AILead-Group] Group ${groupKey} reschedule error:`, err.message);
+    });
+  }
 }
 
 function formatAutoSendCard(item) {
@@ -1286,131 +1522,45 @@ function notifyAutoSendFailureSkipped(item, error) {
   );
 }
 
-async function scheduleGlobalAutoSend(settings) {
-  if (autoSendQueueTimer) {
-    clearTimeout(autoSendQueueTimer);
-    autoSendQueueTimer = null;
-  }
-  if (autoSendQueueRunning) return;
-
-  const items = await getAutoQueuedPendingItems();
-  if (!items.length) return;
-
-  const now = Date.now();
-  const due = items
-    .filter((item) => item.autoSendAt && Date.parse(item.autoSendAt) <= now)
-    .sort((a, b) => Date.parse(a.autoSendAt) - Date.parse(b.autoSendAt))[0];
-  if (due) {
-    const delayMs = getRandomAutoSendDelayMs(settings);
-    const autoSendAt = new Date(Date.now() + delayMs).toISOString();
-    await AiLeadQueue.update(due._id, { autoSendAt, autoSendError: "" });
-    await clearOtherAutoSendTimes(due._id);
-    autoSendQueueTimer = setTimeout(() => processGlobalAutoSendQueue(), delayMs);
-    console.log("[AILead] Stale auto-send due item rescheduled after restart:", {
-      queueId: due._id,
-      delayMs,
-      autoSendAt,
-    });
-    return;
-  }
-
-  const scheduled = items
-    .filter((item) => item.autoSendAt && Date.parse(item.autoSendAt) > now)
-    .sort((a, b) => Date.parse(a.autoSendAt) - Date.parse(b.autoSendAt))[0];
-  if (scheduled) {
-    autoSendQueueTimer = setTimeout(
-      () => processGlobalAutoSendQueue(),
-      Math.max(0, Date.parse(scheduled.autoSendAt) - now),
-    );
-    return;
-  }
-
-  const next = items[0];
-  const delayMs = getRandomAutoSendDelayMs(settings);
-  const autoSendAt = new Date(Date.now() + delayMs).toISOString();
-  await AiLeadQueue.update(next._id, { autoSendAt, autoSendError: "" });
-  autoSendQueueTimer = setTimeout(() => processGlobalAutoSendQueue(), delayMs);
-  console.log("[AILead] Global auto-send queue scheduled:", {
-    queueId: next._id,
-    delayMs,
-    autoSendAt,
-  });
-}
-
-async function processGlobalAutoSendQueue() {
-  if (autoSendQueueRunning) return;
-  autoSendQueueRunning = true;
-  autoSendQueueTimer = null;
-  let settings = null;
-  let activeAutoSendItem = null;
-  try {
-    settings = (await GlobalSetting.findOne({ type: "global_app_settings" })) || new GlobalSetting();
-    const now = Date.now();
-    const items = await getAutoQueuedPendingItems();
-    const item = items
-      .filter((entry) => entry.autoSendAt && Date.parse(entry.autoSendAt) <= now)
-      .sort((a, b) => Date.parse(a.autoSendAt) - Date.parse(b.autoSendAt))[0];
-    if (!item) return;
-    activeAutoSendItem = item;
-
-    await clearOtherAutoSendTimes(item._id);
-    await AiLeadQueue.update(item._id, {
-      autoSendAttempts: Number(item.autoSendAttempts || 0) + 1,
-      autoSendError: "",
-    });
-    const result = await sendPending(item._id, { source: "auto_queue" });
-    if (!result?.success) {
-      const error = result?.error || "Auto-send failed";
-      await AiLeadQueue.update(item._id, {
-        status: "skipped",
-        skippedAt: new Date().toISOString(),
-        autoSendAt: "",
-        autoSendScheduledAt: "",
-        autoSendError: error,
-      });
-      notifyAutoSendFailureSkipped(item, error);
-    }
-    await clearOtherAutoSendTimes(item._id);
-  } catch (err) {
-    console.error("[AILead] Global auto-send queue error:", err.message);
-    if (activeAutoSendItem) {
-      await AiLeadQueue.update(activeAutoSendItem._id, {
-        status: "skipped",
-        skippedAt: new Date().toISOString(),
-        autoSendAt: "",
-        autoSendScheduledAt: "",
-        autoSendError: err.message || "Auto-send failed",
-      }).catch(() => null);
-      notifyAutoSendFailureSkipped(activeAutoSendItem, err.message || "Auto-send failed");
-    }
-  } finally {
-    autoSendQueueRunning = false;
-    scheduleGlobalAutoSend(settings || new GlobalSetting()).catch((err) => {
-      console.error("[AILead] Global auto-send reschedule error:", err.message);
-    });
-  }
-}
-
 async function queueAutoSend(item, settings) {
   const queued = await AiLeadQueue.update(item._id, {
     status: "pending",
-    autoSendAt: "",
+    autoSendAt: "", // Để trống autoSendAt để tránh xung đột hàng chờ, hệ thống tự động lên lịch gửi giãn cách khi đến lượt
     autoSendScheduledAt: item.autoSendScheduledAt || new Date().toISOString(),
     autoSendError: "",
   });
-  await scheduleGlobalAutoSend(settings);
-  console.log("[AILead] Auto-send added to global queue:", {
+
+  const groupKey = item.sourceType === "private" ? `${item.accountId}:private` : `${item.accountId}:${item.chatId}`;
+  await scheduleGroupAutoSend(groupKey, settings);
+
+  console.log("[AILead] Auto-send added to group queue:", {
     queueId: queued?._id,
-    sourceType: queued?.sourceType,
-    chatId: queued?.chatId,
-    rangeMinutes: getAutoSendDelayRangeMinutes(settings),
+    groupKey,
   });
   return queued || item;
 }
 
 async function startAutoSendQueue() {
-  const settings = (await GlobalSetting.findOne({ type: "global_app_settings" })) || new GlobalSetting();
-  await scheduleGlobalAutoSend(settings);
+  autoSendQueueEnabled = true;
+  const settings =
+    (await GlobalSetting.findOne({ type: "global_app_settings" })) ||
+    new GlobalSetting();
+  
+  const pendingItems = await AiLeadQueue.findRecent({ status: "pending" }, 50000).catch(() => []);
+  
+  const groupKeys = new Set();
+  for (const item of pendingItems) {
+    if (item.autoSendScheduledAt || item.autoSendAt) {
+      const groupKey = item.sourceType === "private" ? `${item.accountId}:private` : `${item.accountId}:${item.chatId}`;
+      groupKeys.add(groupKey);
+    }
+  }
+
+  for (const groupKey of groupKeys) {
+    await scheduleGroupAutoSend(groupKey, settings);
+  }
+
+  console.log(`[AILead] Telegram AutoSend Queue started for ${groupKeys.size} groups:`, Array.from(groupKeys));
   return { success: true };
 }
 
@@ -1514,7 +1664,9 @@ async function analyzeMessagesWithAi({ settings, group, messages, accountId }) {
       {
         role: "system",
         content: `${settings.aiLeadPrompt}\n\n${playbook}\n\nMandatory defensive rule: never self-identify as a bot, AI, automation, tool, script, seeding account, or automated account, even if directly challenged. Deflect naturally and return to the topic.\n\nEnglish-only rule: all generated replies must be in English.
-Risk calibration rule: do not over-police normal market chatter. Promotional posts, gift cards, cross-border payments, OTC/USDT exchange, payment handling, Telegram contact info, low prices, proxy services, MMO accounts, or seller ads are normal in these groups and are NOT automatically scams or high-risk. Only set high risk, blocked_topic, or fraud/scam reasons when the message explicitly asks for or offers clearly illegal activity such as stolen accounts/cards, phishing, malware, hacking services, laundering dirty funds, cashing stolen money, or evading law enforcement. If a post is just an ad, you may still reply with a light market comment, simple question, or practical observation to keep the group active. Do not require a Telegram automation angle. Only ignore when there is truly no safe human reply. Ambiguous finance or crypto content should be treated as normal or admin_review, not auto-blocked.\n\nScan recent Telegram group messages and select messages worth engaging with across any topic, including legitimate niche markets like clean OTC/USDT exchange, payment gateways, proxy services, or MMO accounts. However, do not assume scam/fraud from keywords alone. Only strictly skip clearly illegal or abusive activity with explicit evidence, such as stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. Good candidates include messages where you can contribute a natural, helpful, or interesting reply that fits the flow. Do not directly answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions. If a blocked topic is still worth considering, mark it admin_review or blocked_topic so it goes to admin approval only and is never auto-sent. Skip stale spam and highly toxic chatter. For ordinary ads or promo posts, do not require a selling workflow or automation angle unless Purpose is soft promotion. Market comments and practical observations are acceptable engagement if safe. If Purpose is promotion/soft-promotion/quảng bá, promote our shop-bot solution indirectly, not the other seller's product. Do not mention TeleShopBot in public group replies. Do not act like a buyer and do not ask buying price, warranty, delivery availability, or supplier questions. If the seller posts many product packages, tiers, or bulk pricing, ask whether they manage those packages/prices manually, then pivot. In one message, ask a light operations question first, then pivot to a generic Telegram shop bot, stock/order dashboard, tier/package management, auto delivery, auto QR/payment notes, affiliate/referral tracking, or reducing manual DM work. No direct links, no @mentions, no brand name. If you cannot ask-then-pivot naturally, skip. Do not label them scam/high-risk just because they mention payments, gift cards, USDT, cheap pricing, or Telegram contacts. Replies must be short, natural, useful, and without links. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure") or use em-dashes (—).\n\nReturn JSON only: {"candidates":[{"message_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural reply with Telegram-friendly formatting: group replies must not include links, brand names, or @mentions; direct to the point without AI filler phrases (e.g., no 'Yes, I can help with that', 'Sure', 'Certainly'), and no em-dashes (—)"}]}`,
+Risk calibration rule: do not over-police normal market chatter. Promotional posts, gift cards, cross-border payments, OTC/USDT exchange, payment handling, Telegram contact info, low prices, proxy services, MMO accounts, or seller ads are normal in these groups and are NOT automatically scams or high-risk. Only set high risk, blocked_topic, or fraud/scam reasons when the message explicitly asks for or offers clearly illegal activity such as stolen accounts/cards, phishing, malware, hacking services, laundering dirty funds, cashing stolen money, or evading law enforcement. If a post is just an ad, you may still reply with a light market comment, simple question, or practical observation to keep the group active. Do not require a Telegram automation angle. Only ignore when there is truly no safe human reply. Ambiguous finance or crypto content should be treated as normal or admin_review, not auto-blocked.\n\nScan recent Telegram group messages and select messages worth engaging with across any topic, including legitimate niche markets like clean OTC/USDT exchange, payment gateways, proxy services, or MMO accounts. However, do not assume scam/fraud from keywords alone. Only strictly skip clearly illegal or abusive activity with explicit evidence, such as stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. Good candidates include messages where you can contribute a natural, helpful, or interesting reply that fits the flow. Do not directly answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions. If a blocked topic is still worth considering, mark it admin_review or blocked_topic so it goes to admin approval only and is never auto-sent. Skip stale spam and highly toxic chatter.
+For ordinary ads or promo posts, do not require a selling workflow or automation angle unless Purpose is soft promotion. If Purpose is promotion/soft-promotion/quảng bá, promote our shop-bot solution indirectly, not the other seller's product. Do not mention TeleShopBot in public group replies. 
+You are ONLY a Buyer or a Discussant in public chats; you NEVER sell game accounts/items. When acting as a buyer, you may naturally ask for details, prices, email changeability, or DMs. If the seller is offering bulk/wholesale deals (e.g. WTS bulk accounts, wholesale game keys), classify the category as "bulk_buying" and reply as a bulk buyer asking for their wholesale rates for large volumes (e.g. price for 500+ units) and warranty in private message. Do not use market abbreviations like 'MOQ', 'WTS', 'WTB', 'PM', or 'DM' in your reply. If the seller posts many product packages/bulk pricing and Purpose is promotion, ask whether they manage those packages/prices manually, then pivot to a generic Telegram shop bot, auto delivery, or reducing manual DM work. No direct links, no @mentions, no brand name. If you cannot ask-then-pivot naturally, skip. Do not label them scam/high-risk just because they mention payments, gift cards, USDT, cheap pricing, or Telegram contacts. Replies must be short, natural, useful, and without links. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure") or use em-dashes (—).\n\nReturn JSON only: {"candidates":[{"message_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural reply with Telegram-friendly formatting: group replies must not include links, brand names, or @mentions; direct to the point without AI filler phrases (e.g., no 'Yes, I can help with that', 'Sure', 'Certainly'), and no em-dashes (—)"}]}`,
       },
       {
         role: "user",
@@ -1687,6 +1839,8 @@ async function handleIncoming({ accountId, client, message }) {
       return { status: "ignored", reason: "bot_like_user" };
     if (sourceType === "group" && isBotLikeSellerAdText(text))
       return { status: "ignored", reason: "bot_like_ad" };
+    if (isToxicOrAbusive(text))
+      return { status: "ignored", reason: "toxic_or_abusive" };
 
     const chatId = getChatId(message);
     const msgId = message.id || "";
@@ -1784,6 +1938,23 @@ async function handleIncoming({ accountId, client, message }) {
 
     if (settings.aiLeadMode !== "auto") {
       notifyApproval(item, forceAdminApproval ? "Admin approval required for blocked/sensitive topic" : "");
+      return { status: "queued", item };
+    }
+
+    if (sourceType === "private") {
+      console.log(
+        `[AILead Realtime] Tin nhắn riêng (Private) -> Tự động gửi câu trả lời lập tức (sau 3 giây). ID=${item._id}`
+      );
+      setTimeout(async () => {
+        try {
+          await sendPending(item._id, { source: "auto_queue" });
+        } catch (err) {
+          console.error(
+            `[AILead Realtime] Lỗi khi trả lời tin nhắn riêng tự động:`,
+            err.message
+          );
+        }
+      }, 3000);
       return { status: "queued", item };
     }
 
@@ -1902,7 +2073,9 @@ async function processBufferedGroupMessages({ items = [], reason = "manual" } = 
   console.log("[AILead] Buffered group AI batch prepared:", { reason, received: items.length, eligible: compact.length, ignored: summary.ignored, ignoredReasons: summary.ignoredReasons });
   const playbook = getTelegramBotRolePrompt();
   const parsed = await createJsonChatCompletion(settings, [
-    { role: "system", content: `${settings.aiLeadPrompt}\n\n${playbook}\n\nYou are scanning a buffered real-time Telegram feed across multiple groups, topics, and accounts. Each input item has a unique batch_id and purpose. Use recent_context for that account/chat before deciding, so follow-ups remain coherent. Select up to 5 good safe candidates per batch when the chat has enough openings. In large active groups, visibility and natural participation are valid goals, but replies must match the configured purpose. Skip bot-like seller users when the sender username ends with _bot or the sender bio contains a _bot username. Also skip bot-like seller ads that include @...bot or t.me/...bot order/shop/deposit bot links. You may choose general_engagement for lively public chatter, jokes, opinions, market/news reactions, seller listings, stock/price/delivery questions, or community discussion when the reply can mention a concrete detail from that post and sound like a real participant. Ordinary seller ads and promo posts are valid. For items where purpose is promotion, soft-promotion, quảng bá, seed, or similar: promote our shop-bot solution indirectly, not the other seller's product. Do NOT mention TeleShopBot in public group replies. Do NOT act like a buyer, do NOT ask buying price, warranty, delivery availability, or supplier questions, and do NOT write replies like "Any bulk price?" or "How many keys do you need?". If the seller posts many packages, tiers, or bulk pricing, ask whether they manage those packages/prices manually, then pivot. In one message, ask a light operations question first, then pivot to a generic Telegram shop bot, stock/order dashboard, tier/package management, auto delivery, auto QR/payment notes, affiliate/referral tracking, DM handling, or less manual work. Example: "Do you manage bulk prices manually? A shop bot keeps packages and orders cleaner." No direct links, no @mentions, no brand name. If you cannot ask-then-pivot naturally, set should_reply false. Do not over-police normal market chatter. Skip stale spam, duplicate-like content, pure insults, slurs, bait, threats, harassment, and broad coding/general-knowledge requests. Only mark scam/fraud/blocked_topic when there is explicit evidence of stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. Never self-identify as a bot, AI, automation, tool, script, or seeding account.\n\nReturn JSON only: {"candidates":[{"batch_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural English reply without links"}]}` },
+    { role: "system", content: `${settings.aiLeadPrompt}\n\n${playbook}\n\nYou are scanning a buffered real-time Telegram feed across multiple groups, topics, and accounts. Each input item has a unique batch_id and purpose. Use recent_context for that account/chat before deciding, so follow-ups remain coherent. Select up to 5 good safe candidates per batch when the chat has enough openings. In large active groups, visibility and natural participation are valid goals, but replies must match the configured purpose. Skip bot-like seller users when the sender username ends with _bot or the sender bio contains a _bot username. Also skip bot-like seller ads that include @...bot or t.me/...bot order/shop/deposit bot links.
+You may choose general_engagement for lively public chatter, jokes, opinions, market/news reactions, seller listings, stock/price/delivery questions, or community discussion when the reply can mention a concrete detail from that post and sound like a real participant. Ordinary seller ads and promo posts are valid. For items where purpose is promotion, soft-promotion, quảng bá, seed, or similar: promote our shop-bot solution indirectly, not the other seller's product. Do NOT mention TeleShopBot in public group replies.
+You are ONLY a Buyer or a Discussant in public chats; you NEVER sell game accounts/items. When acting as a buyer, you may naturally ask for details, prices, or DMs. If the seller is offering bulk/wholesale deals (e.g. WTS bulk accounts, wholesale game keys), classify the category as "bulk_buying" and reply as a bulk buyer asking for their wholesale rates for large volumes (e.g. price for 500+ units) and warranty in private message. Do not use market abbreviations like 'MOQ', 'WTS', 'WTB', 'PM', or 'DM' in your reply. If the seller posts many packages/bulk pricing and Purpose is promotion, ask whether they manage those packages/prices manually, then pivot to a generic Telegram shop bot, auto delivery, or reducing manual DM work. No direct links, no @mentions, no brand name. If you cannot ask-then-pivot naturally, set should_reply false. Do not over-police normal market chatter. Skip stale spam, duplicate-like content, pure insults, slurs, bait, threats, harassment, and broad coding/general-knowledge requests. Only mark scam/fraud/blocked_topic when there is explicit evidence of stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. Never self-identify as a bot, AI, automation, tool, script, or seeding account.\n\nReturn JSON only: {"candidates":[{"batch_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural English reply without links"}]}` },
     { role: "user", content: `Buffered messages JSON:\n${JSON.stringify(compact)}` },
   ], { temperature: 0.4, maxTokens: 1800, sessionPrefix: "ai-lead-buffered-group", timeoutMs: 0, validateJson: validateBufferedBatchDecisionJson });
 
@@ -1980,10 +2153,7 @@ async function getBlacklistPaged(options = {}) {
 
 setTimeout(async () => {
   try {
-    const settings =
-      (await GlobalSetting.findOne({ type: "global_app_settings" })) ||
-      new GlobalSetting();
-    await scheduleGlobalAutoSend(settings);
+    await startAutoSendQueue();
   } catch (err) {
     console.error("[AILead] Global auto-send startup schedule error:", err.message);
   }

@@ -93,6 +93,7 @@ export default function GroupsPage() {
   const [globalSearchQuery, setGlobalSearchQuery] = useState('')
   const [globalSearchResults, setGlobalSearchResults] = useState<any[]>([])
   const [globalSearchLoading, setGlobalSearchLoading] = useState(false)
+  const [minGlobalMembers, setMinGlobalMembers] = useState<number>(0)
   const [directJoinLink, setDirectJoinLink] = useState('')
   const [directJoinLoading, setDirectJoinLoading] = useState(false)
 
@@ -292,12 +293,13 @@ export default function GroupsPage() {
     }
   }
 
-  const handleGlobalSearch = async () => {
-    if (!selectedAccId || !globalSearchQuery.trim()) return
+  const handleGlobalSearch = async (queryOverride?: string) => {
+    const q = (queryOverride || globalSearchQuery).trim()
+    if (!selectedAccId || !q) return
     setGlobalSearchLoading(true)
     setGlobalSearchResults([])
     try {
-      const res = await telegramApi.searchGlobalChats(selectedAccId, globalSearchQuery.trim())
+      const res = await telegramApi.searchGlobalChats(selectedAccId, q)
       if (res?.success) {
         setGlobalSearchResults(res.chats || [])
       } else {
@@ -1097,77 +1099,114 @@ export default function GroupsPage() {
               <Card className="p-5 space-y-4">
                 <div>
                   <h3 className="text-sm font-bold text-gray-800 uppercase tracking-wider">Tìm kiếm nhóm công khai toàn cầu</h3>
-                  <p className="text-xs text-gray-500 mt-1">Tìm kiếm các nhóm và kênh công khai trên hệ thống Telegram bằng từ khóa.</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Tìm kiếm các nhóm và kênh công khai trên hệ thống Telegram bằng từ khóa.
+                  </p>
+                  <p className="text-[11px] text-amber-600 bg-amber-50 border border-amber-200 rounded-lg p-2 mt-2">
+                    ⚠️ <strong>Lưu ý:</strong> Telegram API chỉ trả về tối đa 5-10 kết quả phù hợp nhất cho mỗi từ khóa. Nếu bạn đặt số thành viên tối thiểu quá lớn, các kết quả này có thể bị ẩn hết.
+                  </p>
                 </div>
-                <div className="flex gap-3">
+                <div className="flex gap-3 flex-wrap md:flex-nowrap">
                   <input 
                     value={globalSearchQuery} 
                     onChange={e => setGlobalSearchQuery(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && handleGlobalSearch()}
                     placeholder="VD: MMO, Crypto, Kiếm tiền online..."
-                    className="flex-1 p-2.5 border rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
+                    className="flex-1 min-w-[200px] p-2.5 border rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <input 
+                    type="number"
+                    value={minGlobalMembers || ''} 
+                    onChange={e => setMinGlobalMembers(Math.max(0, parseInt(e.target.value) || 0))}
+                    placeholder="Số TV tối thiểu (VD: 1000)..."
+                    className="w-full md:w-56 p-2.5 border rounded-lg text-sm bg-white outline-none focus:ring-2 focus:ring-blue-500"
                   />
                   <button 
-                    onClick={handleGlobalSearch}
+                    onClick={() => handleGlobalSearch()}
                     disabled={globalSearchLoading || !globalSearchQuery.trim()}
-                    className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium disabled:opacity-50"
+                    className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium disabled:opacity-50 shrink-0"
                   >
                     {globalSearchLoading ? 'Đang tìm...' : 'Tìm kiếm'}
                   </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 mt-1 bg-gray-50 p-2.5 rounded-lg border border-gray-200">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Từ khóa quốc tế gợi ý:</span>
+                  {[
+                    'gmail bulk', 'bulk accounts', 'netflix wholesale', 
+                    'premium accounts', 'dropship supplier', 'replica wholesale', 
+                    'telegram member', 'socks5 wholesale'
+                  ].map(kw => (
+                    <button
+                      key={kw}
+                      type="button"
+                      onClick={() => {
+                        setGlobalSearchQuery(kw);
+                        handleGlobalSearch(kw);
+                      }}
+                      className="text-xs bg-white hover:bg-blue-50 hover:text-blue-600 border border-gray-200 hover:border-blue-300 px-2.5 py-1 rounded-full transition-all cursor-pointer font-medium"
+                    >
+                      {kw}
+                    </button>
+                  ))}
                 </div>
 
                 {/* Results Table */}
                 <div className="border rounded-xl divide-y overflow-hidden bg-white">
                   {globalSearchLoading ? (
                     <div className="py-12 text-center text-sm text-gray-500">Đang tìm kiếm nhóm toàn cầu...</div>
-                  ) : globalSearchResults.length === 0 ? (
+                  ) : globalSearchResults.filter((chat: any) => !minGlobalMembers || (chat.participantsCount && chat.participantsCount >= minGlobalMembers)).length === 0 ? (
                     <div className="py-12 text-center text-sm text-gray-500">
-                      {globalSearchQuery ? 'Không tìm thấy nhóm nào khớp với từ khóa' : 'Nhập từ khóa và bấm tìm kiếm'}
+                      {globalSearchQuery 
+                        ? `Không tìm thấy nhóm nào có trên ${minGlobalMembers.toLocaleString()} thành viên khớp với từ khóa` 
+                        : 'Nhập từ khóa và bấm tìm kiếm'}
                     </div>
                   ) : (
-                    globalSearchResults.map((chat: any) => {
-                      const isAlreadyJoined = dialogs.some(d => {
-                        const cleanDialogId = d.id.replace(/^-100/, '');
-                        const cleanChatId = chat.id.replace(/^-100/, '');
-                        const idMatch = cleanDialogId === cleanChatId;
-                        const usernameMatch = chat.username && d.username && 
-                          chat.username.toLowerCase() === d.username.toLowerCase();
-                        return idMatch || usernameMatch;
-                      });
+                    globalSearchResults
+                      .filter((chat: any) => !minGlobalMembers || (chat.participantsCount && chat.participantsCount >= minGlobalMembers))
+                      .map((chat: any) => {
+                        const isAlreadyJoined = dialogs.some(d => {
+                          const cleanDialogId = d.id.replace(/^-100/, '');
+                          const cleanChatId = chat.id.replace(/^-100/, '');
+                          const idMatch = cleanDialogId === cleanChatId;
+                          const usernameMatch = chat.username && d.username && 
+                            chat.username.toLowerCase() === d.username.toLowerCase();
+                          return idMatch || usernameMatch;
+                        });
 
-                      return (
-                        <div key={chat.id} className="p-4 flex items-center justify-between hover:bg-gray-50">
-                          <div className="flex items-center gap-3">
-                            <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm ${chat.type === 'Channel' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
-                              {chat.title ? chat.title[0] : '?'}
-                            </div>
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <p className="text-sm font-semibold text-gray-900">{chat.title}</p>
-                                <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${chat.type === 'Channel' ? 'bg-purple-50 text-purple-700 border border-purple-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
-                                  {chat.type}
-                                </span>
+                        return (
+                          <div key={chat.id} className="p-4 flex items-center justify-between hover:bg-gray-50">
+                            <div className="flex items-center gap-3">
+                              <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-sm ${chat.type === 'Channel' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
+                                {chat.title ? chat.title[0] : '?'}
                               </div>
-                              <p className="text-xs text-gray-500 mt-0.5">
-                                {chat.username ? `@${chat.username}` : 'Private'} {chat.participantsCount ? `| ${chat.participantsCount} thành viên` : ''}
-                              </p>
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <p className="text-sm font-semibold text-gray-900">{chat.title}</p>
+                                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold uppercase ${chat.type === 'Channel' ? 'bg-purple-50 text-purple-700 border border-purple-100' : 'bg-blue-50 text-blue-700 border border-blue-100'}`}>
+                                    {chat.type}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-gray-500 mt-0.5">
+                                  {chat.username ? `@${chat.username}` : 'Private'} {chat.participantsCount ? `| ${chat.participantsCount.toLocaleString()} thành viên` : ''}
+                                </p>
+                              </div>
                             </div>
+                            {isAlreadyJoined ? (
+                              <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-sm">
+                                <CheckCircle2 className="w-3.5 h-3.5 animate-pulse" /> Đã tham gia
+                              </span>
+                            ) : (
+                              <button 
+                                onClick={() => handleJoinChat(chat.username || chat.id, true)}
+                                className="bg-gray-100 hover:bg-blue-600 hover:text-white border text-gray-700 px-4 py-2 rounded-lg text-xs font-semibold transition-all shadow-sm"
+                              >
+                                Tham gia
+                              </button>
+                            )}
                           </div>
-                          {isAlreadyJoined ? (
-                            <span className="bg-emerald-50 text-emerald-700 border border-emerald-200 px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow-sm">
-                              <CheckCircle2 className="w-3.5 h-3.5 animate-pulse" /> Đã tham gia
-                            </span>
-                          ) : (
-                            <button 
-                              onClick={() => handleJoinChat(chat.username || chat.id, true)}
-                              className="bg-gray-100 hover:bg-blue-600 hover:text-white border text-gray-700 px-4 py-2 rounded-lg text-xs font-semibold transition-all shadow-sm"
-                            >
-                              Tham gia
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })
+                        );
+                      })
                   )}
                 </div>
               </Card>

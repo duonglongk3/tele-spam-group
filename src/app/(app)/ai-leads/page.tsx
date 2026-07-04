@@ -59,6 +59,7 @@ export default function AiLeadsPage() {
   const [list, setList] = useState<QueueItem[]>([])
   const [blacklist, setBlacklist] = useState<any[]>([])
   const [statusFilter, setStatusFilter] = useState<string>('pending')
+  const [categoryFilter, setCategoryFilter] = useState<string>('all')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
   const [processingId, setProcessingId] = useState<string | null>(null)
@@ -81,7 +82,7 @@ export default function AiLeadsPage() {
     if (statusFilter !== 'blacklist') {
       loadQueue(queuePage)
     }
-  }, [statusFilter, queuePage, queueLimit])
+  }, [statusFilter, queuePage, queueLimit, categoryFilter])
 
   useEffect(() => {
     if (statusFilter === 'blacklist') {
@@ -98,7 +99,10 @@ export default function AiLeadsPage() {
   async function loadQueue(pageToLoad = queuePage) {
     try {
       setLoading(true)
-      const filter = statusFilter === 'all' ? {} : { status: statusFilter }
+      const filter: any = statusFilter === 'all' ? {} : { status: statusFilter }
+      if (categoryFilter !== 'all') {
+        filter.category = categoryFilter
+      }
       const res = await telegramApi.getAiLeadQueue(filter, queueLimit, pageToLoad)
       if (res?.success) {
         setList(res.list || [])
@@ -240,30 +244,50 @@ export default function AiLeadsPage() {
         </button>
       </div>
 
-      {/* Bộ lọc trạng thái */}
-      <div className="flex gap-2 p-1 bg-gray-100 rounded-lg w-fit">
-        {[
-          { key: 'pending', label: 'Đang chờ' },
-          { key: 'sent', label: 'Đã gửi' },
-          { key: 'skipped', label: 'Đã bỏ qua' },
-          { key: 'all', label: 'Tất cả' },
-          { key: 'blacklist', label: 'Danh sách đen' }
-        ].map(tab => (
-          <button
-            key={tab.key}
-            onClick={() => {
-              setStatusFilter(tab.key)
-              setQueuePage(1)
-            }}
-            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
-              statusFilter === tab.key
-                ? 'bg-white text-gray-900 shadow-sm'
-                : 'text-gray-500 hover:text-gray-900'
-            }`}
-          >
-            {tab.label}
-          </button>
-        ))}
+      {/* Bộ lọc trạng thái và loại tin nhắn */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-gray-50/50 border rounded-xl p-4">
+        <div className="flex gap-2 p-1 bg-gray-100 rounded-lg w-fit">
+          {[
+            { key: 'pending', label: 'Đang chờ' },
+            { key: 'sent', label: 'Đã gửi' },
+            { key: 'skipped', label: 'Đã bỏ qua' },
+            { key: 'all', label: 'Tất cả' },
+            { key: 'blacklist', label: 'Danh sách đen' }
+          ].map(tab => (
+            <button
+              key={tab.key}
+              onClick={() => {
+                setStatusFilter(tab.key)
+                setQueuePage(1)
+              }}
+              className={`px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
+                statusFilter === tab.key
+                  ? 'bg-white text-gray-900 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+
+        {statusFilter !== 'blacklist' && (
+          <div className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500 font-medium whitespace-nowrap">Loại tin nhắn:</span>
+            <select
+              value={categoryFilter}
+              onChange={e => {
+                setCategoryFilter(e.target.value)
+                setQueuePage(1)
+              }}
+              className="border rounded-lg px-3 py-2 bg-white font-medium text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#24A1DE] cursor-pointer"
+            >
+              <option value="all">Tất cả loại</option>
+              <option value="engagement">Thảo luận & Quảng bá dạo</option>
+              <option value="buying">Hỏi mua sỉ & lẻ</option>
+            </select>
+          </div>
+        )}
       </div>
 
       {loading ? (

@@ -967,13 +967,23 @@ class TelegramMultiClient {
                         ? unansweredMessages
                         : chronologicalMessages.filter(msg => msg && !msg.out && (msg.message || msg.text || '').trim()).slice(-unreadLimit);
                     if (validMessages.length > 0) {
+                        const lastMsg = validMessages[validMessages.length - 1];
+                        const lastMsgDateMs = (lastMsg.date || 0) * 1000;
+                        const elapsedMs = Date.now() - lastMsgDateMs;
+                        if (elapsedMs < 60000) {
+                            console.log('[AILead] Skip private conversation unread scan because customer might be still typing:', {
+                                chatId: entity.id?.toString?.() || String(entity.id || ''),
+                                elapsedSeconds: Math.round(elapsedMs / 1000),
+                            });
+                            continue;
+                        }
+
                         console.log('[AILead] Private unread conversation found:', { accountId, chatId: entity.id?.toString?.() || String(entity.id || ''), unreadCount, validMessages: validMessages.length });
                         const recentPrivateContext = chronologicalMessages
                             .filter(msg => msg && (msg.message || msg.text || '').trim())
                             .slice(-20)
                             .map(msg => `${msg.out ? 'TeleShopBot.Com' : 'Customer'}: ${(msg.message || msg.text || '').trim()}`)
                             .join('\\n');
-                        const lastMsg = validMessages[validMessages.length - 1];
                         const combinedText = validMessages.map(msg => (msg.message || msg.text || '').trim()).filter(Boolean).join('\n');
 
                         if (!combinedText) {
@@ -1901,6 +1911,8 @@ class TelegramMultiClient {
                         type
                     };
                 });
+                // Sắp xếp các nhóm có nhiều thành viên hơn lên đầu
+                chats.sort((a, b) => (b.participantsCount || 0) - (a.participantsCount || 0));
                 return { success: true, chats };
             } catch (err) {
                 return { success: false, error: err.message };

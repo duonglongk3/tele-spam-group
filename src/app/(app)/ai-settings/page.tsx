@@ -22,6 +22,7 @@ type EngagementGroup = {
 const PURPOSE_OPTIONS = [
   { value: 'discussion', label: 'Thảo luận tự nhiên' },
   { value: 'promotion', label: 'Thảo luận dạng quảng bá mềm' },
+  { value: 'bulk_buying', label: 'Hỏi mua sỉ / Tìm nhà cung cấp sỉ' },
 ]
 
 export default function AiSettingsPage() {

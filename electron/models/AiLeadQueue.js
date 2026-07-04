@@ -96,16 +96,37 @@ class AiLeadQueue {
     const limit = Math.max(1, Math.min(Number(options.limit || 20), 100));
     const page = Math.max(1, Number(options.page || 1));
     const offset = (page - 1) * limit;
-    const countRow = status
-      ? await get(`SELECT COUNT(*) as total FROM ai_lead_queue WHERE status = ?`, [status])
-      : await get(`SELECT COUNT(*) as total FROM ai_lead_queue`);
     const rows = status
       ? await all(`SELECT data FROM ai_lead_queue WHERE status = ?`, [status])
       : await all(`SELECT data FROM ai_lead_queue`);
-    const total = Number(countRow?.total || 0);
+    const categoryFilter = filter.category;
+
+    let groups = [];
+    try {
+      const settingsRow = await get(`SELECT data FROM settings WHERE type = 'global_app_settings'`);
+      if (settingsRow) {
+        const settings = JSON.parse(settingsRow.data);
+        groups = settings.aiLeadEngagementGroups || [];
+      }
+    } catch (e) {
+      console.error("[AiLeadQueue] Error loading settings for filter:", e.message);
+    }
+
     const sorted = rows
       .map(rowToItem)
       .filter(Boolean)
+      .filter(item => {
+        if (!categoryFilter || categoryFilter === 'all') return true;
+        const groupConfig = groups.find(
+          (g) => String(g.accountId) === String(item.accountId) && String(g.chatId) === String(item.chatId)
+        );
+        const isBulkBuyingGroup = groupConfig?.purpose === "bulk_buying";
+        const isBuyingStream = (item.sourceType === "private") || isBulkBuyingGroup;
+
+        if (categoryFilter === 'buying') return isBuyingStream;
+        if (categoryFilter === 'engagement') return !isBuyingStream;
+        return true;
+      })
       .sort((a, b) => {
         const aSendAt = Date.parse(a.autoSendAt || "");
         const bSendAt = Date.parse(b.autoSendAt || "");
@@ -122,6 +143,7 @@ class AiLeadQueue {
         const bCreated = Date.parse(b.createdAt || "") || 0;
         return bCreated - aCreated;
       });
+    const total = sorted.length;
     return {
       items: sorted.slice(offset, offset + limit),
       total,
