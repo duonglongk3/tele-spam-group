@@ -401,7 +401,13 @@ class TelegramMultiClient {
                 this.accounts.set(acc.id, acc);
                 this.connectAccount(acc).catch(console.error);
             }
-            this.startAiLeadPrivateInboxWatcher().catch((err) => console.error('[AILead] Watcher start error:', err.message));
+            const GlobalSetting = require("./models/Setting");
+            const settings = await GlobalSetting.findOne({ type: "global_app_settings" }).catch(() => null);
+            if (settings && settings.aiLeadUserReplyEnabled === true && settings.openaiApiKey) {
+                this.startAiLeadPrivateInboxWatcher().catch((err) => console.error('[AILead] Watcher start error:', err.message));
+            } else {
+                console.log('[AILead] Private inbox watcher is disabled or OpenAI API key is missing. Skipping watcher start.');
+            }
         } catch(err) {
             console.error('[TelegramService] DB Init error:', err);
         }
@@ -414,15 +420,46 @@ class TelegramMultiClient {
 
         try {
             await client.connect();
-            const me = await client.getMe();
-            this.clients.set(account.id, client);
+            // Đợi 1.5s để GramJS hoàn tất đồng bộ thời gian (timeOffset) với máy chủ Telegram
+            await new Promise(r => setTimeout(r, 1500));
+            
+            // Thử lấy thông tin GetMe với cơ chế retry nếu gặp lỗi MSGID_DECREASE_RETRY hoặc 500
+            let me;
+            let getMeAttempts = 3;
+            for (let i = 1; i <= getMeAttempts; i++) {
+                try {
+                    me = await client.getMe();
+                    break;
+                } catch (getMeErr) {
+                    if ((getMeErr.message?.includes('MSGID_DECREASE_RETRY') || getMeErr.message?.includes('500') || getMeErr.code === 500) && i < getMeAttempts) {
+                        console.warn(`[Telegram] getMe attempt ${i} transient failure: ${getMeErr.message}. Retrying in 1s...`);
+                        await new Promise(r => setTimeout(r, 1000));
+                        continue;
+                    }
+                    throw getMeErr;
+                }
+            }
 
+            this.clients.set(account.id, client);
             this.registerIncomingHandlers(client, account.id, me);
             
             let about = '';
             try {
-                const fullMe = await client.invoke(new Api.users.GetFullUser({ id: 'me' }));
-                about = fullMe.fullUser.about || '';
+                // Thử GetFullUser với cơ chế retry
+                let fullMe;
+                for (let i = 1; i <= 3; i++) {
+                    try {
+                        fullMe = await client.invoke(new Api.users.GetFullUser({ id: 'me' }));
+                        break;
+                    } catch (fullMeErr) {
+                        if ((fullMeErr.message?.includes('MSGID_DECREASE_RETRY') || fullMeErr.message?.includes('500') || fullMeErr.code === 500) && i < 3) {
+                            await new Promise(r => setTimeout(r, 1000));
+                            continue;
+                        }
+                        throw fullMeErr;
+                    }
+                }
+                about = fullMe?.fullUser?.about || '';
             } catch (e) {}
 
             const accInfo = {
@@ -601,13 +638,32 @@ class TelegramMultiClient {
             return { success: false, error: "Định dạng Session không hợp lệ (Not a valid string). Vui lòng copy chính xác." };
         }
         
-        // Giảm retry xuống 1 để fail nhanh nếu session rác
-        const client = new TelegramClient(session, getTelegramApiId(), getTelegramApiHash(), getClientOptions({ connectionRetries: 1 }));
+        // Để connectionRetries là 3 để GramJS có cơ hội tự động tái đồng bộ timeOffset nếu máy chủ lệch giờ
+        const client = new TelegramClient(session, getTelegramApiId(), getTelegramApiHash(), getClientOptions({ connectionRetries: 3 }));
         client.setLogLevel('none'); // Tắt log rác hiển thị ra terminal
 
         try {
             await client.connect();
-            const me = await client.getMe();
+            // Đợi 1.5s để GramJS hoàn tất đồng bộ thời gian (timeOffset) với máy chủ Telegram
+            await new Promise(r => setTimeout(r, 1500));
+            
+            // Lấy thông tin GetMe với retry nếu gặp lỗi đồng bộ thời gian MSGID_DECREASE_RETRY hoặc 500
+            let me;
+            let getMeAttempts = 3;
+            for (let i = 1; i <= getMeAttempts; i++) {
+                try {
+                    me = await client.getMe();
+                    break;
+                } catch (getMeErr) {
+                    if ((getMeErr.message?.includes('MSGID_DECREASE_RETRY') || getMeErr.message?.includes('500') || getMeErr.code === 500) && i < getMeAttempts) {
+                        console.warn(`[Telegram] Import getMe attempt ${i} transient failure: ${getMeErr.message}. Retrying in 1s...`);
+                        await new Promise(r => setTimeout(r, 1000));
+                        continue;
+                    }
+                    throw getMeErr;
+                }
+            }
+
             const accountId = me.id.toString();
 
             if (this.clients.has(accountId)) {
@@ -616,8 +672,21 @@ class TelegramMultiClient {
 
             let about = '';
             try {
-                const fullMe = await client.invoke(new Api.users.GetFullUser({ id: 'me' }));
-                about = fullMe.fullUser.about || '';
+                // Lấy GetFullUser với retry
+                let fullMe;
+                for (let i = 1; i <= 3; i++) {
+                    try {
+                        fullMe = await client.invoke(new Api.users.GetFullUser({ id: 'me' }));
+                        break;
+                    } catch (fullMeErr) {
+                        if ((fullMeErr.message?.includes('MSGID_DECREASE_RETRY') || fullMeErr.message?.includes('500') || fullMeErr.code === 500) && i < 3) {
+                            await new Promise(r => setTimeout(r, 1000));
+                            continue;
+                        }
+                        throw fullMeErr;
+                    }
+                }
+                about = fullMe?.fullUser?.about || '';
             } catch (e) {}
 
             this.clients.set(accountId, client);
@@ -850,7 +919,7 @@ class TelegramMultiClient {
             const recentPrivateContext = chronologicalMessages
                 .filter(msg => msg && (msg.message || msg.text || '').trim())
                 .slice(-20)
-                .map(msg => `${msg.out ? 'TeleShopBot.Com' : 'Customer'}: ${(msg.message || msg.text || '').trim()}`)
+                .map(msg => `${msg.out ? 'Buyer' : 'Customer'}: ${(msg.message || msg.text || '').trim()}`)
                 .join('\n');
             const lastOutgoingIndex = chronologicalMessages.map(msg => Boolean(msg?.out)).lastIndexOf(true);
             const messagesAfterLastReply = chronologicalMessages.slice(lastOutgoingIndex + 1);
@@ -982,7 +1051,7 @@ class TelegramMultiClient {
                         const recentPrivateContext = chronologicalMessages
                             .filter(msg => msg && (msg.message || msg.text || '').trim())
                             .slice(-20)
-                            .map(msg => `${msg.out ? 'TeleShopBot.Com' : 'Customer'}: ${(msg.message || msg.text || '').trim()}`)
+                            .map(msg => `${msg.out ? 'Buyer' : 'Customer'}: ${(msg.message || msg.text || '').trim()}`)
                             .join('\\n');
                         const combinedText = validMessages.map(msg => (msg.message || msg.text || '').trim()).filter(Boolean).join('\n');
 

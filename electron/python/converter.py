@@ -52,16 +52,23 @@ try:
         return decorated_cls
         
     opentele.utils.extend_class.__new__ = patched_extend_class_new
-    
-    # Dọn dẹp mock để sẵn sàng nạp opentele thật
-    del sys.modules['opentele.td']
-    del sys.modules['opentele.tl']
-    if hasattr(sys.modules['opentele'], 'td'):
-        delattr(sys.modules['opentele'], 'td')
-    if hasattr(sys.modules['opentele'], 'tl'):
-        delattr(sys.modules['opentele'], 'tl')
 except BaseException as e:
     sys.stderr.write(f"Patch opentele error: {str(e)}\n")
+finally:
+    try:
+        import types
+        if 'opentele.td' in sys.modules and isinstance(sys.modules['opentele.td'], types.ModuleType) and not hasattr(sys.modules['opentele.td'], '__file__'):
+            del sys.modules['opentele.td']
+        if 'opentele.tl' in sys.modules and isinstance(sys.modules['opentele.tl'], types.ModuleType) and not hasattr(sys.modules['opentele.tl'], '__file__'):
+            del sys.modules['opentele.tl']
+        if 'opentele' in sys.modules:
+            opentele_mod = sys.modules['opentele']
+            if hasattr(opentele_mod, 'td') and not hasattr(getattr(opentele_mod, 'td'), '__file__'):
+                delattr(opentele_mod, 'td')
+            if hasattr(opentele_mod, 'tl') and not hasattr(getattr(opentele_mod, 'tl'), '__file__'):
+                delattr(opentele_mod, 'tl')
+    except:
+        pass
 
 # Tự động import opentele và telethon
 # Tránh in bất cứ thứ gì ra stdout ngoại trừ JSON kết quả
@@ -600,9 +607,10 @@ async def submit_login_code(phone, code, phone_code_hash, password=None):
         return result
 
 async def main():
-    # Đọc tham số từ stdin dạng JSON
+    # Đọc tham số từ stdin dưới dạng bytes và decode UTF-8 để tránh lỗi font chữ/mã hóa trên Windows
     try:
-        input_data = sys.stdin.read().strip()
+        input_bytes = sys.stdin.buffer.read()
+        input_data = input_bytes.decode('utf-8').strip()
         if not input_data:
             print(json.dumps({"status": "error", "message": "Khong nhan duoc du lieu input qua stdin"}))
             return

@@ -84,11 +84,40 @@ class AiLeadQueue {
   }
 
   static async findRecent(filter = {}, limit = 10) {
-    const status = filter.status;
-    const rows = status
-      ? await all(`SELECT data FROM ai_lead_queue WHERE status = ? ORDER BY createdAt DESC LIMIT ?`, [status, limit])
-      : await all(`SELECT data FROM ai_lead_queue ORDER BY createdAt DESC LIMIT ?`, [limit]);
-    return rows.map(rowToItem).filter(Boolean);
+    const clauses = [];
+    const params = [];
+    if (filter.status) {
+      clauses.push("status = ?");
+      params.push(filter.status);
+    }
+    if (filter.accountId) {
+      clauses.push("accountId = ?");
+      params.push(String(filter.accountId));
+    }
+    if (filter.chatId) {
+      clauses.push("chatId = ?");
+      params.push(String(filter.chatId));
+    }
+    if (filter.messageId) {
+      clauses.push("messageId = ?");
+      params.push(String(filter.messageId));
+    }
+    if (filter.senderId) {
+      clauses.push("senderId = ?");
+      params.push(String(filter.senderId));
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const query = `SELECT data FROM ai_lead_queue ${where} ORDER BY createdAt DESC LIMIT ?`;
+    params.push(limit);
+
+    const rows = await all(query, params);
+    const items = rows.map(rowToItem).filter(Boolean);
+
+    if (filter.sourceType) {
+      return items.filter(item => item.sourceType === filter.sourceType);
+    }
+    return items;
   }
 
   static async findRecentPaged(filter = {}, options = {}) {
@@ -96,10 +125,6 @@ class AiLeadQueue {
     const limit = Math.max(1, Math.min(Number(options.limit || 20), 100));
     const page = Math.max(1, Number(options.page || 1));
     const offset = (page - 1) * limit;
-    const rows = status
-      ? await all(`SELECT data FROM ai_lead_queue WHERE status = ?`, [status])
-      : await all(`SELECT data FROM ai_lead_queue`);
-    const categoryFilter = filter.category;
 
     let groups = [];
     try {
@@ -112,10 +137,52 @@ class AiLeadQueue {
       console.error("[AiLeadQueue] Error loading settings for filter:", e.message);
     }
 
+    const allRows = await all(`SELECT data FROM ai_lead_queue`);
+    const uniqueGroups = [];
+    const seenGroupKeys = new Set();
+
+    // 1. Thêm các nhóm được cấu hình quét trong cài đặt trước
+    for (const g of groups) {
+      const key = `${g.accountId}:${g.chatId}`;
+      if (!seenGroupKeys.has(key)) {
+        seenGroupKeys.add(key);
+        uniqueGroups.push({
+          accountId: String(g.accountId),
+          chatId: String(g.chatId),
+          chatTitle: g.title || g.username || "Group",
+        });
+      }
+    }
+
+    // 2. Thêm các nhóm xuất hiện trong hàng chờ thực tế (nếu chưa có)
+    for (const row of allRows) {
+      const item = rowToItem(row);
+      if (item && item.chatId && item.sourceType === "group") {
+        const key = `${item.accountId}:${item.chatId}`;
+        if (!seenGroupKeys.has(key)) {
+          seenGroupKeys.add(key);
+          uniqueGroups.push({
+            accountId: item.accountId,
+            chatId: item.chatId,
+            chatTitle: item.chatTitle || item.chatUsername || "Group",
+          });
+        }
+      }
+    }
+
+    const rows = status
+      ? await all(`SELECT data FROM ai_lead_queue WHERE status = ?`, [status])
+      : allRows;
+    const categoryFilter = filter.category;
+    const chatIdFilter = filter.chatId;
+
     const sorted = rows
       .map(rowToItem)
       .filter(Boolean)
       .filter(item => {
+        if (chatIdFilter && chatIdFilter !== 'all' && String(item.chatId) !== String(chatIdFilter)) {
+          return false;
+        }
         if (!categoryFilter || categoryFilter === 'all') return true;
         const groupConfig = groups.find(
           (g) => String(g.accountId) === String(item.accountId) && String(g.chatId) === String(item.chatId)
@@ -128,17 +195,16 @@ class AiLeadQueue {
         return true;
       })
       .sort((a, b) => {
-        const aSendAt = Date.parse(a.autoSendAt || "");
-        const bSendAt = Date.parse(b.autoSendAt || "");
-        const aHasSendAt = a.status === "pending" && Number.isFinite(aSendAt);
-        const bHasSendAt = b.status === "pending" && Number.isFinite(bSendAt);
-        if (aHasSendAt !== bHasSendAt) return aHasSendAt ? -1 : 1;
-        if (aHasSendAt && bHasSendAt && aSendAt !== bSendAt) return aSendAt - bSendAt;
-
-        const aQueued = a.status === "pending" && Boolean(a.autoSendScheduledAt || a.autoSendAt);
-        const bQueued = b.status === "pending" && Boolean(b.autoSendScheduledAt || b.autoSendAt);
-        if (aQueued !== bQueued) return aQueued ? -1 : 1;
-
+        if (status === 'sent') {
+          const aSent = Date.parse(a.sentAt || a.updatedAt || "") || 0;
+          const bSent = Date.parse(b.sentAt || b.updatedAt || "") || 0;
+          return bSent - aSent;
+        }
+        if (status === 'skipped') {
+          const aSkipped = Date.parse(a.skippedAt || a.updatedAt || "") || 0;
+          const bSkipped = Date.parse(b.skippedAt || b.updatedAt || "") || 0;
+          return bSkipped - aSkipped;
+        }
         const aCreated = Date.parse(a.createdAt || "") || 0;
         const bCreated = Date.parse(b.createdAt || "") || 0;
         return bCreated - aCreated;
@@ -150,6 +216,7 @@ class AiLeadQueue {
       page,
       limit,
       totalPages: Math.max(1, Math.ceil(total / limit)),
+      uniqueGroups,
     };
   }
 
@@ -193,6 +260,17 @@ class AiLeadQueue {
     );
   }
 
+  static async countSentByChatSender(accountId, chatId, senderId) {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayISO = todayStart.toISOString();
+    const row = await get(
+      `SELECT COUNT(*) AS count FROM ai_lead_queue WHERE accountId = ? AND chatId = ? AND senderId = ? AND status = 'sent' AND sentAt >= ?`,
+      [String(accountId), String(chatId), String(senderId || ""), todayISO]
+    );
+    return Number(row?.count || 0);
+  }
+
   static async findRecentSentByChat(accountId, chatId, limit = 10) {
     const rows = await all(
       `SELECT data FROM ai_lead_queue WHERE accountId = ? AND chatId = ? AND status = 'sent' ORDER BY createdAt DESC LIMIT ?`,
@@ -201,10 +279,17 @@ class AiLeadQueue {
     return rows.map(rowToItem).filter(Boolean).reverse();
   }
 
-  static async findRecentConversationByChat(accountId, chatId, limit = 10) {
+  static async findRecentConversationByChat(accountId, chatId, limit = 10, senderId = null) {
+    const clauses = ["accountId = ?", "chatId = ?", "status IN ('pending', 'sent')"];
+    const params = [String(accountId), String(chatId)];
+    if (senderId) {
+      clauses.push("senderId = ?");
+      params.push(String(senderId));
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = await all(
-      `SELECT data FROM ai_lead_queue WHERE accountId = ? AND chatId = ? AND status IN ('pending', 'sent') ORDER BY createdAt DESC LIMIT ?`,
-      [String(accountId), String(chatId), limit],
+      `SELECT data FROM ai_lead_queue ${where} ORDER BY createdAt DESC LIMIT ?`,
+      [...params, limit],
     );
     return rows.map(rowToItem).filter(Boolean).reverse();
   }
@@ -226,6 +311,17 @@ class AiLeadQueue {
       [next.status, next.updatedAt, JSON.stringify(next), id],
     );
     return next;
+  }
+
+  static async delete(id) {
+    return run(`DELETE FROM ai_lead_queue WHERE id = ?`, [id]);
+  }
+
+  static async clear(status = null) {
+    if (status) {
+      return run(`DELETE FROM ai_lead_queue WHERE status = ?`, [status]);
+    }
+    return run(`DELETE FROM ai_lead_queue`);
   }
 }
 

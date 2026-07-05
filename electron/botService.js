@@ -849,11 +849,16 @@ Lệnh:
     if (baseUrl && baseUrl.startsWith('https://')) {
       const webhookUrl = `${baseUrl}/webhook`;
       await bot.telegram.setWebhook(webhookUrl);
-      console.log(`[Telegram Bot] Webhook set to ${webhookUrl} via Next.js port 3000`);
+      console.log(`[Telegram Bot] Webhook set to ${webhookUrl}`);
+      startWebhookServer(3000);
       if (adminChatId && !silent) {
-        bot.telegram.sendMessage(adminChatId, '🤖 Bot đã kết nối webhook qua Next.js backend port 3000.').catch(e => {});
+        bot.telegram.sendMessage(adminChatId, '🤖 Bot đã kết nối webhook qua cổng 3000.').catch(e => {});
       }
     } else {
+      if (webhookServer) {
+        webhookServer.close(() => { console.log('[Webhook Server] Stopped.'); });
+        webhookServer = null;
+      }
       await bot.telegram.deleteWebhook();
       await bot.launch();
       console.log('[Telegram Bot] Started with long polling because Webhook URL is empty.');
@@ -955,5 +960,33 @@ async function handleWebhookUpdate(update) {
   await bot.handleUpdate(update);
 }
 
-module.exports = { initBot, notifyAdmin, getBot, handleWebhookUpdate };
+let webhookServer = null;
+
+function startWebhookServer(port = 3000) {
+  if (webhookServer) return;
+  try {
+    const express = require('express');
+    const app = express();
+    app.use(express.json());
+    app.post('/webhook', async (req, res) => {
+      try {
+        await handleWebhookUpdate(req.body);
+        res.status(200).json({ ok: true });
+      } catch (err) {
+        console.error('[Webhook Server] handle error:', err);
+        res.status(500).json({ ok: false, error: err.message });
+      }
+    });
+    app.get('/webhook', (req, res) => {
+      res.json({ ok: true, message: 'Telegram webhook endpoint ready (Express)' });
+    });
+    webhookServer = app.listen(port, () => {
+      console.log(`[Webhook Server] Listening for Telegram webhooks on port ${port}`);
+    });
+  } catch (err) {
+    console.error('[Webhook Server] Failed to start:', err.message);
+  }
+}
+
+module.exports = { initBot, notifyAdmin, getBot, handleWebhookUpdate, startWebhookServer };
 

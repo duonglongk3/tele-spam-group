@@ -3,6 +3,13 @@ const sqlite3 = require("sqlite3").verbose();
 
 const DB_PATH = (() => {
   if (process.env.SQLITE_DB_PATH) return process.env.SQLITE_DB_PATH;
+  
+  const devDbPath = "E:\\code-chu\\telegram-auto-post\\data\\telegram-auto-post.sqlite3";
+  const fs = require("fs");
+  if (fs.existsSync(path.dirname(devDbPath))) {
+    return devDbPath;
+  }
+
   try {
     const { app } = require("electron");
     if (app && app.isPackaged) {
@@ -172,6 +179,7 @@ async function connectDB() {
 
   await run("PRAGMA foreign_keys = ON");
   await run("PRAGMA journal_mode = WAL");
+  await run("PRAGMA busy_timeout = 15000");
   await migrate();
   console.log(`[SQLite] Connected successfully: ${DB_PATH}`);
   return dbInstance;

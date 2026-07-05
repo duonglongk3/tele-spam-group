@@ -16,7 +16,8 @@ import {
   Search,
   ChevronLeft,
   ChevronRight,
-  Filter
+  Filter,
+  Trash2
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { telegramApi } from '@/lib/telegram'
@@ -60,6 +61,8 @@ export default function AiLeadsPage() {
   const [blacklist, setBlacklist] = useState<any[]>([])
   const [statusFilter, setStatusFilter] = useState<string>('pending')
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
+  const [uniqueGroups, setUniqueGroups] = useState<{ accountId: string; chatId: string; chatTitle: string }[]>([])
+  const [groupFilter, setGroupFilter] = useState<string>('all')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
   const [processingId, setProcessingId] = useState<string | null>(null)
@@ -82,7 +85,7 @@ export default function AiLeadsPage() {
     if (statusFilter !== 'blacklist') {
       loadQueue(queuePage)
     }
-  }, [statusFilter, queuePage, queueLimit, categoryFilter])
+  }, [statusFilter, queuePage, queueLimit, categoryFilter, groupFilter])
 
   useEffect(() => {
     if (statusFilter === 'blacklist') {
@@ -103,12 +106,18 @@ export default function AiLeadsPage() {
       if (categoryFilter !== 'all') {
         filter.category = categoryFilter
       }
+      if (groupFilter !== 'all') {
+        filter.chatId = groupFilter
+      }
       const res = await telegramApi.getAiLeadQueue(filter, queueLimit, pageToLoad)
       if (res?.success) {
         setList(res.list || [])
         setQueueTotal(res.total || 0)
         setQueueTotalPages(res.totalPages || 1)
         setQueuePage(res.page || pageToLoad)
+        if (res.uniqueGroups) {
+          setUniqueGroups(res.uniqueGroups)
+        }
       } else {
         toast.error('Lỗi tải hàng chờ: ' + (res?.error || 'Không rõ'))
       }
@@ -206,16 +215,55 @@ export default function AiLeadsPage() {
       setProcessingId(id)
       const res = await telegramApi.editAiLeadPending(id, editText)
       if (res?.success) {
-        toast.success('Đã cập nhật nội dung gợi ý!')
+        toast.success('Đã lưu phản hồi thành công!')
         setList(prev => prev.map(item => item._id === id ? { ...item, suggestedReply: editText } : item))
         setEditingId(null)
       } else {
-        toast.error('Lỗi cập nhật: ' + (res?.error || 'Không rõ'))
+        toast.error('Lỗi lưu phản hồi: ' + (res?.error || 'Không rõ'))
       }
     } catch (e: any) {
       toast.error('Lỗi kết nối: ' + e.message)
     } finally {
       setProcessingId(null)
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!confirm('Bạn có chắc chắn muốn xóa phản hồi này khỏi hàng chờ?')) return
+    try {
+      setProcessingId(id)
+      const res = await telegramApi.deleteAiLeadQueueItem(id)
+      if (res?.success) {
+        toast.success('Đã xóa phản hồi thành công!')
+        setList(prev => prev.filter(item => item._id !== id))
+        setQueueTotal(prev => Math.max(0, prev - 1))
+      } else {
+        toast.error('Lỗi xóa phản hồi: ' + (res?.error || 'Không rõ'))
+      }
+    } catch (e: any) {
+      toast.error('Lỗi kết nối: ' + e.message)
+    } finally {
+      setProcessingId(null)
+    }
+  }
+
+  async function handleClearQueue() {
+    const statusText = statusFilter === 'pending' ? 'đang chờ' : statusFilter === 'sent' ? 'đã gửi' : statusFilter === 'skipped' ? 'đã bỏ qua' : 'toàn bộ hàng chờ'
+    if (!confirm(`Bạn có chắc chắn muốn xóa tất cả tin nhắn ${statusText}? Hành động này không thể hoàn tác.`)) return
+    try {
+      setLoading(true)
+      const statusToClear = statusFilter === 'all' ? undefined : statusFilter
+      const res = await telegramApi.clearAiLeadQueue(statusToClear)
+      if (res?.success) {
+        toast.success('Đã dọn dẹp hàng chờ thành công!')
+        loadQueue(1)
+      } else {
+        toast.error('Lỗi dọn dẹp: ' + (res?.error || 'Không rõ'))
+      }
+    } catch (e: any) {
+      toast.error('Lỗi kết nối: ' + e.message)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -235,13 +283,25 @@ export default function AiLeadsPage() {
             Danh sách phản hồi AI. Auto queue sẽ tự gửi theo lịch random, còn item duyệt tay vẫn có nút gửi/bỏ qua.
           </p>
         </div>
-        <button
-          onClick={() => statusFilter === 'blacklist' ? loadBlacklist(blacklistPage) : loadQueue(queuePage)}
-          disabled={loading}
-          className="bg-white border hover:bg-gray-50 text-gray-700 px-4 py-2 rounded-lg font-medium flex items-center gap-2 justify-center shadow-sm disabled:opacity-50"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Làm mới
-        </button>
+        <div className="flex gap-2">
+          {statusFilter !== 'blacklist' && list.length > 0 && (
+            <button
+              onClick={handleClearQueue}
+              disabled={loading}
+              className="bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 px-4 py-2 rounded-lg font-medium flex items-center gap-2 justify-center shadow-sm disabled:opacity-50"
+            >
+              <Trash2 className="w-4 h-4" /> 
+              Xóa tất cả {statusFilter === 'pending' ? 'đang chờ' : statusFilter === 'sent' ? 'đã gửi' : statusFilter === 'skipped' ? 'đã bỏ qua' : 'hàng chờ'}
+            </button>
+          )}
+          <button
+            onClick={() => statusFilter === 'blacklist' ? loadBlacklist(blacklistPage) : loadQueue(queuePage)}
+            disabled={loading}
+            className="bg-white border hover:bg-gray-50 text-gray-700 px-4 py-2 rounded-lg font-medium flex items-center gap-2 justify-center shadow-sm disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} /> Làm mới
+          </button>
+        </div>
       </div>
 
       {/* Bộ lọc trạng thái và loại tin nhắn */}
@@ -272,20 +332,41 @@ export default function AiLeadsPage() {
         </div>
 
         {statusFilter !== 'blacklist' && (
-          <div className="flex items-center gap-2 text-sm">
-            <span className="text-gray-500 font-medium whitespace-nowrap">Loại tin nhắn:</span>
-            <select
-              value={categoryFilter}
-              onChange={e => {
-                setCategoryFilter(e.target.value)
-                setQueuePage(1)
-              }}
-              className="border rounded-lg px-3 py-2 bg-white font-medium text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#24A1DE] cursor-pointer"
-            >
-              <option value="all">Tất cả loại</option>
-              <option value="engagement">Thảo luận & Quảng bá dạo</option>
-              <option value="buying">Hỏi mua sỉ & lẻ</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-4 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="text-gray-500 font-medium whitespace-nowrap">Loại tin nhắn:</span>
+              <select
+                value={categoryFilter}
+                onChange={e => {
+                  setCategoryFilter(e.target.value)
+                  setQueuePage(1)
+                }}
+                className="border rounded-lg px-3 py-2 bg-white font-medium text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#24A1DE] cursor-pointer"
+              >
+                <option value="all">Tất cả loại</option>
+                <option value="engagement">Thảo luận & Quảng bá dạo</option>
+                <option value="buying">Hỏi mua sỉ & lẻ</option>
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span className="text-gray-500 font-medium whitespace-nowrap">Nhóm (Group):</span>
+              <select
+                value={groupFilter}
+                onChange={e => {
+                  setGroupFilter(e.target.value)
+                  setQueuePage(1)
+                }}
+                className="border rounded-lg px-3 py-2 bg-white font-medium text-gray-700 shadow-sm focus:outline-none focus:ring-2 focus:ring-[#24A1DE] cursor-pointer max-w-[250px]"
+              >
+                <option value="all">Tất cả nhóm ({uniqueGroups.length})</option>
+                {uniqueGroups.map(g => (
+                  <option key={`${g.accountId}:${g.chatId}`} value={g.chatId}>
+                    {g.chatTitle}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         )}
       </div>
@@ -646,43 +727,79 @@ export default function AiLeadsPage() {
                 {item.status === 'pending' && (
                   <>
                     {(item.autoSendScheduledAt || item.autoSendAt) ? (
-                      <div className="w-full text-center text-xs text-blue-600 font-medium py-2 px-2 rounded-lg bg-blue-50 border border-blue-100">
-                        Đã vào auto queue{item.autoSendAt ? `, gửi lúc ${new Date(item.autoSendAt).toLocaleString('vi-VN')}` : ', đang chờ tới lượt'}
+                      <div className="space-y-3 w-full">
+                        <div className="w-full text-center text-xs text-blue-600 font-medium py-2 px-2 rounded-lg bg-blue-50 border border-blue-100">
+                          Đã vào auto queue{item.autoSendAt ? `, gửi lúc ${new Date(item.autoSendAt).toLocaleString('vi-VN')}` : ', đang chờ tới lượt'}
+                        </div>
+                        <button
+                          onClick={() => handleDelete(item._id)}
+                          disabled={processingId !== null}
+                          className="w-full bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Xóa hàng chờ
+                        </button>
                       </div>
                     ) : (
-                      <button
-                        onClick={() => handleSend(item._id)}
-                        disabled={processingId !== null}
-                        className="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
-                      >
-                        {processingId === item._id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />} Duyệt gửi
-                      </button>
+                      <>
+                        <button
+                          onClick={() => handleSend(item._id)}
+                          disabled={processingId !== null}
+                          className="flex-1 md:flex-none bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                        >
+                          {processingId === item._id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />} Duyệt gửi
+                        </button>
+                        <button
+                          onClick={() => startEditing(item)}
+                          disabled={processingId !== null || editingId === item._id}
+                          className="flex-1 md:flex-none border bg-white hover:bg-gray-50 text-gray-700 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" /> Sửa nhanh
+                        </button>
+                        <button
+                          onClick={() => handleSkip(item._id)}
+                          disabled={processingId !== null}
+                          className="flex-1 md:flex-none bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-100 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
+                        >
+                          <X className="w-3.5 h-3.5" /> Bỏ qua
+                        </button>
+                        <button
+                          onClick={() => handleDelete(item._id)}
+                          disabled={processingId !== null}
+                          className="flex-1 md:flex-none bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Xóa
+                        </button>
+                      </>
                     )}
-                    <button
-                      onClick={() => startEditing(item)}
-                      disabled={processingId !== null || editingId === item._id}
-                      className="flex-1 md:flex-none border bg-white hover:bg-gray-50 text-gray-700 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
-                    >
-                      <Edit2 className="w-3.5 h-3.5" /> Sửa nhanh
-                    </button>
-                    <button
-                      onClick={() => handleSkip(item._id)}
-                      disabled={processingId !== null}
-                      className="flex-1 md:flex-none bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-100 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
-                    >
-                      <X className="w-3.5 h-3.5" /> Bỏ qua
-                    </button>
                   </>
                 )}
                 {item.status === 'sent' && (
-                  <div className="w-full text-center text-xs text-emerald-600 font-medium py-2 flex items-center justify-center gap-1">
-                    <Check className="w-4 h-4" /> Đã gửi thành công
-                  </div>
+                  <>
+                    <div className="w-full text-center text-xs text-emerald-600 font-medium py-2 flex items-center justify-center gap-1">
+                      <Check className="w-4 h-4" /> Đã gửi thành công
+                    </div>
+                    <button
+                      onClick={() => handleDelete(item._id)}
+                      disabled={processingId !== null}
+                      className="w-full bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Xóa
+                    </button>
+                  </>
                 )}
                 {item.status === 'skipped' && (
-                  <div className="w-full text-center text-xs text-gray-400 font-medium py-2 flex items-center justify-center gap-1">
-                    <X className="w-4 h-4" /> Đã bỏ qua đề xuất
-                  </div>
+                  <>
+                    <div className="w-full text-center text-xs text-gray-400 font-medium py-2 flex items-center justify-center gap-1">
+                      <X className="w-4 h-4" /> Đã bỏ qua đề xuất
+                    </div>
+                    <button
+                      onClick={() => handleDelete(item._id)}
+                      disabled={processingId !== null}
+                      className="w-full bg-red-50 hover:bg-red-100 text-red-700 border border-red-100 px-3 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Xóa
+                    </button>
+                  </>
                 )}
               </div>
             </div>

@@ -112,6 +112,10 @@ export const telegramApi = {
     ipc('aiLead:skipPending', { id }),
   editAiLeadPending: (id: string, text: string) =>
     ipc('aiLead:editPending', { id, text }),
+  deleteAiLeadQueueItem: (id: string) =>
+    ipc('aiLead:deleteQueueItem', { id }),
+  clearAiLeadQueue: (status?: string) =>
+    ipc('aiLead:clearQueue', { status }),
   getAiLeadBlacklist: () =>
     ipc('aiLead:getBlacklist'),
   getAiLeadBlacklistPaged: (options?: any) =>

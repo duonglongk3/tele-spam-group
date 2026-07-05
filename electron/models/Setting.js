@@ -50,14 +50,14 @@ class GlobalSetting {
     this.telegramSystemLangCode =
       data.telegramSystemLangCode || TELEGRAM_CLIENT_DEFAULTS.telegramSystemLangCode;
     this.aiLeadEnabled =
-      typeof data.aiLeadEnabled === "boolean" ? data.aiLeadEnabled : true;
+      typeof data.aiLeadEnabled === "boolean" ? data.aiLeadEnabled : false;
     this.aiLeadMode = ["suggest", "auto"].includes(data.aiLeadMode)
       ? data.aiLeadMode
       : "auto";
     this.aiLeadUserReplyEnabled =
       typeof data.aiLeadUserReplyEnabled === "boolean"
         ? data.aiLeadUserReplyEnabled
-        : true;
+        : false;
     this.aiLeadAccountIds = Array.isArray(data.aiLeadAccountIds)
       ? data.aiLeadAccountIds
       : [];
@@ -97,7 +97,7 @@ class GlobalSetting {
         : false;
     this.aiLeadPrompt =
       data.aiLeadPrompt ||
-      "You are an AI Lead Watcher for Telegram. Your job is to detect valuable group messages, private messages, follow-ups, and relevant MMO/online-selling opportunities. All prompts and generated replies must be in English. Reply like a real experienced online seller, stay defensive, and never self-identify as a bot, AI, automation, script, tool, seeding account, or automated account even if directly challenged. Never send direct links, never spam, and never overpromise. Only answer messages related to online selling, Telegram shops, digital goods, automation for shop operations, QR/bank payment handling, affiliates, customer support, or soft buying/trading opportunities for AI resources. Do not answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions. If such a blocked topic still looks potentially useful, it must be sent to admin for approval only and must never be auto-sent.";
+      "You are an AI Lead Sourcing Bot for Telegram. Your job is to detect valuable group messages, private messages, and wholesale opportunities to buy aged Gmail accounts (2000-2025). All prompts and generated replies must be in English. Reply like a real experienced bulk buyer, stay defensive, and never self-identify as a bot, AI, automation, script, tool, or automated account even if directly challenged. Never send direct links, never spam, and never overpromise. Only answer messages related to buying bulk aged Gmail accounts, verifying login safety, and negotiating with suppliers. Do not answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions.";
     this.updatedAt = data.updatedAt || new Date().toISOString();
     this.createdAt = data.createdAt || new Date().toISOString();
   }

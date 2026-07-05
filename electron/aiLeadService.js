@@ -6,14 +6,20 @@ const AiLeadBlacklist = require("./models/AiLeadBlacklist");
 const { createJsonChatCompletion } = require("./aiClient");
 const { Api } = require("telegram/tl");
 
+const sendingIds = new Set();
+const lastSendTimeByAccount = new Map();
+const lastSentGroupKeyByAccount = new Map();
+
 function readAgentKnowledgeFile(fileName, label) {
   try {
     const filePath = path.join(
-      process.cwd(),
+      __dirname,
+      "..",
       ".agents",
       "knowledge",
       fileName,
     );
+    console.log(`[AILead Debug Path] ${label} path:`, filePath, "exists:", fs.existsSync(filePath));
     if (fs.existsSync(filePath)) {
       return fs.readFileSync(filePath, "utf8");
     }
@@ -32,12 +38,51 @@ function getPrivateSupportPrompt() {
 }
 
 const seenMessages = new Set();
+
+class PriorityMutex {
+  constructor() {
+    this.privateQueue = [];
+    this.groupQueue = [];
+    this.locked = false;
+  }
+  
+  async acquire(isPrivate = false) {
+    return new Promise((resolve) => {
+      if (!this.locked) {
+        this.locked = true;
+        resolve(() => this.release());
+      } else {
+        if (isPrivate) {
+          this.privateQueue.push(resolve);
+        } else {
+          this.groupQueue.push(resolve);
+        }
+      }
+    });
+  }
+  
+  release() {
+    if (this.privateQueue.length > 0) {
+      const nextResolve = this.privateQueue.shift();
+      nextResolve(() => this.release());
+    } else if (this.groupQueue.length > 0) {
+      const nextResolve = this.groupQueue.shift();
+      nextResolve(() => this.release());
+    } else {
+      this.locked = false;
+    }
+  }
+}
+
+const aiProcessMutex = new PriorityMutex();
+
 const groupBadSenders = new Map(); // key: "accountId:senderId", value: { accountId, senderId, senderName, score, reason, addedAt }
 const accountDailyCounts = new Map();
 const groupDailyCounts = new Map();
 const groupCooldowns = new Map();
 const userCooldowns = new Map();
 let autoSendQueueEnabled = true;
+let autoSendQueueStarted = false;
 const groupTimers = new Map();
 const groupRunning = new Set();
 const groupScheduleChains = new Map();
@@ -342,7 +387,7 @@ function findBotUsernameInText(text) {
 }
 
 function isLikelySelfMessage(settings, accountId, message, text) {
-  const selfNames = [settings?.telegramBotUsername, "teleshopbotcommm"]
+  const selfNames = [settings?.telegramBotUsername]
     .filter(Boolean)
     .map((value) => normalizeTelegramUsername(value).toLowerCase());
   const senderNames = [
@@ -357,7 +402,7 @@ function isLikelySelfMessage(settings, accountId, message, text) {
   const senderId = getSenderId(message);
   if (senderId && String(senderId) === String(accountId)) return true;
   if (senderNames.some((name) => selfNames.includes(name))) return true;
-  return /\bteleshopbot\b/i.test(String(text || ""));
+  return false;
 }
 
 function isLowContextMessage(text) {
@@ -370,13 +415,7 @@ function isLowContextMessage(text) {
 }
 
 function isBotLikeSellerAdText(text) {
-  const raw = String(text || "");
-  if (!raw.trim()) return false;
-  const lower = raw.toLowerCase();
-  const hasBotUsernameOrLink = /(?:@|(?:https?:\/\/)?t\.me\/|telegram\.me\/)[a-z0-9_]*bot/i.test(raw);
-  const hasBotSellerPhrase = /(bot\s+(setor|order|shop|deposit|auto)|auto\s+bot|order\s+lewat\s+bot|shop\s+bot|buy\s+bot|sell\s+bot)/i.test(lower);
-  const telegramRefs = raw.match(/(?:https?:\/\/)?t\.me\/\S+|@[a-z0-9_]{4,}/gi) || [];
-  return hasBotUsernameOrLink || (hasBotSellerPhrase && telegramRefs.length >= 2);
+  return false;
 }
 
 function isBuyerStyleReply(reply) {
@@ -405,23 +444,11 @@ function isPromotionPurpose(purpose = "") {
   return /promo|promotion|quảng bá|quang ba|seed|soft/.test(normalized);
 }
 
-function getPromotionPurposePrompt(purpose = "") {
-  if (!isPromotionPurpose(purpose)) return "";
-  return `
-Soft-promotion purpose rule:
-- Promote our shop-bot solution indirectly. Do NOT mention the brand name TeleShopBot in public group replies.
-- Use one message with this flow: ask a light operations question first, then pivot to a generic solution.
-- Do NOT ask buyer questions about buying price, warranty, delivery availability, or supplier details.
-- If the seller posts many product packages, tiers, or bulk pricing, ask a workflow question about whether they can manage that volume/pricing cleanly, then pivot.
-- Ask about seller workflow instead: handling many packages, tier prices, DMs, tracking orders, managing stock, payment checks, delivery, proof, or referrals.
-- Then softly suggest a generic Telegram shop bot, auto delivery bot, simple dashboard, stock/order tracking, tier/package management, auto payment notes, or referral tracking.
-- Never praise or promote the other seller's product. Use their post only as context to pivot toward better selling workflow.
-- No direct links, no @mentions, no brand name. If you cannot naturally ask-then-pivot, set should_reply false.
-- Good reply examples: "Do you manage bulk prices manually? A shop bot keeps packages and orders cleaner.", "Lots of plans here, do you track each buyer in DM? A small dashboard helps.", "Do you handle all Gmail orders in DM? A shop bot with stock tracking saves time.", "Are 7d/30d plans delivered manually? Auto delivery is cleaner when orders pile up.", "Do buyers send payment proof in DM? A small dashboard keeps paid/unpaid orders clear."
-`;
+function getPromotionPurposePrompt(purpose) {
+  return "";
 }
 function mentionsPublicPromotionBrand(reply) {
-  return /\bteleshop\s*bot\b|\bteleshopbot\b/i.test(String(reply || ""));
+  return false;
 }
 
 function isOverPoliteBotToneReply(reply) {
@@ -439,20 +466,7 @@ function shouldIgnoreBotLikeUser(settings, message, text) {
   const sender = message?.sender || {};
   const username =
     sender.username || message?.senderUsername || message?.username || "";
-  if (isTelegramBotLikeUsername(username)) return true;
-  const profileText = [
-    sender.about,
-    sender.bio,
-    sender.description,
-    message?.senderAbout,
-    message?.senderBio,
-    message?.senderDescription,
-    message?.senderProfileAbout,
-    message?.senderProfileBio,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  return Boolean(findBotUsernameInText(profileText));
+  return Boolean(sender.bot || isTelegramBotLikeUsername(username));
 }
 
 async function getSenderProfileText({ accountId, client, message }) {
@@ -523,28 +537,8 @@ async function getBotLikeUserDetection({ accountId, client, message }) {
   const sender = message?.sender || {};
   const username =
     sender.username || message?.senderUsername || message?.username || "";
-  if (isTelegramBotLikeUsername(username)) {
+  if (sender.bot || isTelegramBotLikeUsername(username)) {
     return { reason: "username_has__bot", value: `@${normalizeTelegramUsername(username)}`, bio: "" };
-  }
-
-  const inlineProfileText = [
-    sender.about,
-    sender.bio,
-    sender.description,
-    message?.senderAbout,
-    message?.senderBio,
-    message?.senderDescription,
-    message?.senderProfileAbout,
-    message?.senderProfileBio,
-  ]
-    .filter(Boolean)
-    .join("\n");
-  const profileText = findBotUsernameInText(inlineProfileText)
-    ? inlineProfileText
-    : await getSenderProfileText({ accountId, client, message });
-  const botUsername = findBotUsernameInText(profileText);
-  if (botUsername) {
-    return { reason: "bio_has__bot", value: `@${normalizeTelegramUsername(botUsername)}`, bio: profileText };
   }
   return null;
 }
@@ -581,13 +575,7 @@ function isPaymentSetupText(text) {
 }
 
 function addPrivateSupportFallbackLink(text, contextText) {
-  if (/https?:\/\/\S+/i.test(text)) return text;
-  if (!isPaymentSetupText(`${text}\n${contextText}`)) return text;
-  const slug = inferShopSlugFromText(contextText);
-  const link = slug
-    ? `https://teleshopbot.com/${slug}/payment`
-    : "https://teleshopbot.com/login";
-  return `${text.trim()}\n\nOpen:\n${link}`;
+  return text;
 }
 
 function formatPrivateSupportText(text) {
@@ -761,15 +749,11 @@ function isLowSignalGroupText(text) {
 async function hasRecentSimilarReply(accountId, chatId, reply) {
   const fingerprint = normalizeReplyFingerprint(reply);
   if (!fingerprint) return false;
-  const opening = getReplyOpening(reply);
-  const recent = await AiLeadQueue.findRecent({ accountId, chatId }, 50).catch(() => []);
+  const recent = await AiLeadQueue.findRecent({ accountId, chatId, status: "sent" }, 5).catch(() => []);
   return recent.some((item) => {
     const existingFingerprint = normalizeReplyFingerprint(item.suggestedReply);
     if (!existingFingerprint) return false;
-    return (
-      existingFingerprint === fingerprint ||
-      (opening && getReplyOpening(item.suggestedReply) === opening)
-    );
+    return existingFingerprint === fingerprint;
   });
 }
 
@@ -802,8 +786,7 @@ async function buildCompactMessagesForAi({
     if (!fingerprint) continue;
     if (
       seenFingerprints.has(fingerprint) ||
-      (senderId && seenSenderIds.has(senderId)) ||
-      (await hasRecentDuplicateFromSender(accountId, senderId, text))
+      (senderId && seenSenderIds.has(senderId))
     ) {
       skippedDuplicate += 1;
       continue;
@@ -1124,37 +1107,43 @@ async function askAi({
 }) {
   const playbook = getTelegramBotRolePrompt();
   const roleInstruction = `
-[ROLE: UNDERCOVER MMO EXPERT, DISCUSSANT & ACTIVE BUYER WITH CURIOSITY HOOK]
+[ROLE: BULK GMAIL BUYER & WHOLESALE SOURCER]
 - You are participating in a PUBLIC TELEGRAM GROUP chat.
-- Act as an experienced MMO practitioner, discussant, or an active buyer/wholesale importer looking for deals.
-- Your ultimate goal is to generate interest in automated shop-bots (teleshopbot.com / Payment Hub) by creating curiosity (Curiosity Loop).
+- Act as an experienced bulk Gmail buyer looking to source aged Gmail accounts (created between 2000 and 2025).
+- Your ultimate goal is to identify bulk Gmail sellers, verify their stock/prices, and invite them to contact you in DMs/PMs to arrange a test batch.
 - IMPORTANT ROLE RULES:
-  1. You are ONLY a Buyer or a Discussant in these public chats. You NEVER act as a Seller of game accounts/items.
-  2. You are looking to buy accounts/items from other sellers, or answering questions/sharing tips about payments, bots, and shop operations.
-  3. When acting as a buyer, vary your replies naturally to avoid repeating the same words (like "proof", "receipts", "MM"). You can comment on the price (e.g., "cheap if clean", "pricing looks fair"), ask casual questions (e.g., "is email changeable?", "what platforms can it link to?", "what skins are on it?"), or suggest them to DM you. Do not ask for proof in every message to prevent sounding like a bot.
-  4. Mode 3 (Bulk Buying): If a user is selling in BULK or wholesale (e.g. WTS bulk accounts, wholesale game keys), act as a wholesale buyer looking for a steady supplier. Inquire about bulk rates for large quantities (e.g. price for 100+, 500+, or 1000+ units), warranty terms, and stock availability. Invite them to message you in private with their bulk list. DO NOT use confusing abbreviations like "MOQ", "WTS", "WTB", "PM", or "DM", write them out clearly (e.g. "large volume", "bulk rate", "selling", "message me in private").
-- Tone: underground-market casual, short, blunt, respectful enough, not polished support. Do not sound like customer service. Avoid forced friendliness and avoid overusing "mate", "buddy", or "dude".
-- Word choice: use short street-market phrasing. Examples: "do you handle all orders in DM?", "manual flow gets messy fast", "one bot for stock + payment is cleaner". Never say "we provide", "I am support", brand names, or polished marketing lines.
-- Remember: NEVER POST DIRECT LINKS. Suggest them to DM you or check the link in your bio.
+  1. You are ONLY a Buyer looking for aged/vintage Gmail accounts. You NEVER sell accounts, and you must strictly ONLY reply to messages offering or selling Gmail accounts. Ignore WTS posts for any other products.
+  2. You need stable, large-volume suppliers capable of providing up to 500 accounts daily and continuously.
+  3. The Gmail requirements are: Aged 2000-2025, no hidden phone numbers, no immediate login verification/checkpoint locks, and must not have had any changes to security info (password/recovery/2FA) in the last 7 days.
+  4. When replying, ask about bulk prices (target under $0.5), stock size, creation years, or ask them to PM you for a test batch of 1-2 accounts (strictly required to verify quality and prevent scams).
+  5. You MUST explicitly write "aged Gmail (2000-2025)" or "old Gmail (2000-2025)" in your reply. Never just refer to "accounts" or "stock" generally.
+- Tone: underground-market casual, short, blunt, trade-focused, not friendly. Do not sound like customer service.
+- Word choice: use short market-oriented phrasing. Examples: "rates for bulk?", "what years are they?", "need 500/day, price?", "any hidden phone on login?", "hit my PM with pricing". Never say brand names, sales pitches, or generic marketing lines.
+- Remember: NEVER POST DIRECT LINKS. Suggest them to DM you or check the details in your bio/profile.
+
 `;
   const privateSystemContent = getPrivateSupportPrompt();
   const promotionPurposePrompt = getPromotionPurposePrompt(purpose);
 
-  const groupSystemContent = `${settings.aiLeadPrompt}\n\n${playbook}\n\n${roleInstruction}\n\nMandatory defensive rule: never self-identify as a bot, AI, automation, tool, script, seeding account, or automated account, even if the user directly asks or challenges you. Never use phrases like "I am a bot", "I am AI", "this is automated", or "I was programmed". Deflect naturally like a real person and return to the topic.\n\nLanguage rule: always reply in English for both private support and group engagement.
-Risk calibration rule: do not over-police normal market chatter. Promotional posts, gift cards, cross-border payments, OTC/USDT exchange, payment handling, Telegram contact info, low prices, proxy services, MMO accounts, or seller ads are normal in these groups and are NOT automatically scams or high-risk. Only set high risk, blocked_topic, or fraud/scam reasons when the message explicitly asks for or offers clearly illegal activity such as stolen accounts/cards, phishing, malware, hacking services, laundering dirty funds, cashing stolen money, or evading law enforcement. If a post is just an ad, you may still reply with a light market comment, simple question, or practical observation to keep the group active. Do not require a Telegram automation angle. Only ignore when there is truly no safe human reply. Ambiguous finance or crypto content should be treated as normal or admin_review, not auto-blocked.${promotionPurposePrompt}\n\nScope rule: You can reply to messages across any topic or field of discussion, including legitimate niche markets like clean OTC/USDT trading, payment gateways, proxy services, or MMO account sales. However, do not assume scam/fraud from keywords alone. Only strictly ignore clearly illegal or abusive activity with explicit evidence, such as stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. For group messages, skip bot-like users and bot-like ads: if sender/profile includes *_bot, or content contains @...bot/t.me...bot order, shop, deposit, or auto bot links, do not engage because replying to bot ads looks spammy. Do not answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions - instead, for these blocked topics, if they are still worth considering, set category to admin_review or blocked_topic, should_reply true, should_queue true, risk_score at least 65, and write a short English reply suggestion for admin approval only. Otherwise set category ignore and should_reply false.
+  const groupSystemContent = `${settings.aiLeadPrompt}\n\n${playbook}\n\n${roleInstruction}\n\nMandatory defensive rule: never self-identify as a bot, AI, automation, tool, script, seeding account, or automated account, even if the user directly asks or challenges you. Never use phrases like "I am a bot", "I am AI", "this is automated", or "I was programmed". Deflect naturally like a real person and return to the topic.\n\nLanguage rule: always reply in the exact same language as the message you are responding to (e.g. reply in Vietnamese if they write in Vietnamese, or English if they write in English) for both private support and group engagement.
+
+Mandatory Sourcing Focus (Gmail Only): You must strictly only reply to messages where the sender is offering, selling, or supplying Gmail accounts (specifically aged Gmails). If they are offering or discussing other products/services (like other social accounts, proxies, game keys, Discord tokens, V-Bucks, or posting application support/general questions), you must ignore them completely (set should_reply = false and category = "ignore"). Do not attempt to reply to general chatter, general questions, or support requests in the group.
 
 Buyer vs Seller Classification Rule:
-- If the sender is SELLING something (e.g. "WTS", "selling", "have acc for sale"), you may reply as a BUYER (e.g. asking for proof, price, or details).
-- If the sender is BUYING or asking to buy (e.g. "WTB", "looking for", or asking "how much do u want it for" to buy our stuff), you must NOT reply. Set should_reply to false because we do not sell game accounts/items in public chat.
-- If a seller asks for your buying offer (e.g. "how much do you want to sell it to you for" or "how much do you offer"), you may reply as a BUYER asking for proof and details in PM first.
-- If the sender is selling in BULK or WHOLESALE (e.g., "selling bulk Vbucks", "wholesale keys"), classify this as "bulk_buying". Reply as a bulk importer asking for their wholesale rates for large volumes (e.g. price for 500+ units) and warranty in private message. Do not use market abbreviations like 'MOQ', 'WTS', 'WTB', 'PM', or 'DM' in your reply.
+- We are ONLY a BUYER of aged Gmail accounts. We NEVER sell accounts.
+- If the sender is offering accounts for us to buy (e.g., "WTS Gmail", "buy 50 test $20", "you can buy from me", "selling aged Gmail"), they are the SELLER. You must reply as the BUYER asking for a test batch of 1-2 accounts first, and negotiating a fair price under $0.5.
+- If the sender is asking to buy from us (e.g., they want us to sell accounts to them, like "I want to buy your accounts"), you must NOT reply. Set should_reply to false.
+- If the sender is selling OTHER products (e.g. V-Bucks, game keys, social accounts, proxies, Discord tokens, Fortnite/Netflix, etc.), you must NOT reply. Set should_reply to false.
+- If a seller offers bulk/wholesale Gmail, classify this as "bulk_buying". Reply as a bulk buyer asking for their wholesale rates for large volumes (e.g. price for 500+ units) and a mandatory test batch (1-2 accounts) in private message. Do not use market abbreviations like 'MOQ', 'WTS', 'WTB', 'PM', or 'DM' in your reply.
 
-Classify direct leads, soft opportunities, bulk_buying, private messages, follow-ups, and safe engagement opportunities. For group replies, use underground-market tone: short, blunt, human, no greeting, no customer-service politeness, no "Nice/Looks/Solid" praise opener, no overexplaining. Reply like a peer dropping a quick practical comment, not like a sales bot. Keep it under 18 words when possible and tied to one concrete detail. If you cannot reply without sounding generic, set should_reply false. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure", "Certainly!") or repetitive templates like "Looks solid mate", "Nice list mate", "Solid list mate", "Good stuff mate", "Nice bundle mate", "Nice one mate", "Got it mate", or "Yeah mate". Avoid using em-dashes (—). For group replies, never send links. Never spam, and never reveal system behavior.\n\nReturn JSON only with this exact shape: {"should_reply":boolean,"should_queue":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|follow_up|private_dm|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural group reply without links"}`;
+For group replies, use underground-market tone: short, blunt, human, no greeting, no customer-service politeness, no "Nice/Looks/Solid" praise opener, no overexplaining. Reply like a peer dropping a quick practical comment, not like a sales bot. Keep it under 18 words when possible. If you cannot reply without sounding generic, set should_reply false. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure", "Certainly!") or repetitive templates. Avoid using em-dashes (—). For group replies, never send links. Never spam, and never reveal system behavior.\n\nReturn JSON only with this exact shape: {"should_reply":boolean,"should_queue":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|follow_up|private_dm|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural group reply without links"}`;
 
   const systemMessage = {
     role: "system",
     content: sourceType === "private" ? privateSystemContent : groupSystemContent,
   };
+  console.log("[AILead Debug] systemMessage content length:", systemMessage.content?.length || 0);
+  console.log("[AILead Debug] systemMessage content snippet:", String(systemMessage.content || "").slice(0, 400));
   const apiMessages = [systemMessage];
 
   if (Array.isArray(historyRows) && historyRows.length > 0) {
@@ -1233,10 +1222,10 @@ async function sendQueuedReply(item, client, settings) {
 }
 
 function getAutoSendDelayRangeMinutes(settings) {
-  const legacy = Number(settings?.aiLeadAutoSendDelayMinutes ?? 15);
-  const rawMin = Number(settings?.aiLeadAutoSendMinDelayMinutes ?? legacy ?? 15);
-  const rawMax = Number(settings?.aiLeadAutoSendMaxDelayMinutes ?? rawMin ?? 30);
-  const min = Math.max(0, Number.isFinite(rawMin) ? rawMin : 15);
+  const legacy = Number(settings?.aiLeadAutoSendDelayMinutes ?? 5);
+  const rawMin = Number(settings?.aiLeadAutoSendMinDelayMinutes ?? legacy ?? 5);
+  const rawMax = Number(settings?.aiLeadAutoSendMaxDelayMinutes ?? rawMin ?? 10);
+  const min = Math.max(0, Number.isFinite(rawMin) ? rawMin : 5);
   const max = Math.max(min, Number.isFinite(rawMax) ? rawMax : min);
   return { min, max };
 }
@@ -1251,52 +1240,7 @@ function isAutoQueuedItem(item) {
   return Boolean(item?.autoSendScheduledAt || item?.autoSendAt);
 }
 
-function formatAutoSendCard(item) {
-  return [
-    "AI auto-sent reply",
-    `ID: ${item._id}`,
-    `Tên nhóm: ${item.chatTitle}`,
-    `Người gửi: ${item.senderName}`,
-    `Score: ${item.score} | Category: ${item.category}`,
-    "",
-    `Tin gốc:\n${String(item.originalText || "").slice(0, 700)}`,
-    "",
-    `Đã gửi:\n${item.suggestedReply}`,
-  ].join("\n");
-}
 
-function notifyAutoSendSuccess(item) {
-  const adminBotService = require("./adminBotService");
-  adminBotService.notifyAll(formatAutoSendCard(item), {}, {
-    queueId: item._id,
-    prefix: "auto_sent",
-  });
-}
-
-function notifyAutoSendFailureSkipped(item, error) {
-  const adminBotService = require("./adminBotService");
-  adminBotService.notifyAll(
-    [
-      "AI auto-send failed & item skipped",
-      `ID: ${item._id}`,
-      `Group: ${item.chatTitle}`,
-      `Sender: ${item.senderName}`,
-      `Error: ${error || "unknown"}`,
-      "",
-      `Original:\n${String(item.originalText || "").slice(0, 700)}`,
-      "",
-      `Reply:\n${item.suggestedReply}`,
-    ].join("\n"),
-    {},
-    {
-      queueId: item._id,
-      sourceType: item.sourceType,
-      chatId: item.chatId,
-      messageId: item.messageId,
-      prefix: "auto_failed_skipped",
-    },
-  );
-}
 
 async function getPendingItemsForGroup(accountId, chatId, limit = 50000) {
   const filter = { status: "pending", accountId };
@@ -1312,7 +1256,7 @@ async function getPendingItemsForGroup(accountId, chatId, limit = 50000) {
     .sort((a, b) => {
       const aTime = Date.parse(a.autoSendScheduledAt || a.createdAt || "");
       const bTime = Date.parse(b.autoSendScheduledAt || b.createdAt || "");
-      return aTime - bTime;
+      return bTime - aTime;
     });
 }
 
@@ -1362,7 +1306,9 @@ async function scheduleGroupAutoSendOnce(groupKey, settings, options = {}) {
     await clearGroupOtherSendTimes(groupKey, due._id);
     const timer = setTimeout(() => processGroupAutoSendQueue(groupKey), 0);
     groupTimers.set(groupKey, timer);
-    console.log(`[AILead-Group] Group ${groupKey} due item ready:`, due._id);
+    if (!options.silent) {
+      console.log(`[AILead-Group] Group ${groupKey} due item ready:`, due._id);
+    }
     return;
   }
 
@@ -1378,16 +1324,35 @@ async function scheduleGroupAutoSendOnce(groupKey, settings, options = {}) {
       Math.max(0, Date.parse(scheduled.autoSendAt) - now),
     );
     groupTimers.set(groupKey, timer);
-    console.log(`[AILead-Group] Group ${groupKey} scheduled next item at:`, scheduled.autoSendAt);
+    if (!options.silent) {
+      console.log(`[AILead-Group] Group ${groupKey} scheduled next item at:`, scheduled.autoSendAt);
+    }
     return;
   }
 
   // Item mới chưa gán autoSendAt. Dùng delayMs
   const next = items[0];
-  const delayMs =
+  let delayMs =
     options.forceDelayMs !== undefined
       ? options.forceDelayMs
       : getRandomAutoSendDelayMs(settings);
+
+  // Nếu là tin nhắn phản hồi tiếp (follow_up) trong group, dùng delay 30 giây để phản hồi nhanh
+  if (next && next.category === "follow_up") {
+    delayMs = 30000;
+  } else if (next) {
+    // Áp dụng cooldown toàn cầu giữa các nhóm khác nhau cho cùng một tài khoản (mặc định tối thiểu 5 phút)
+    const lastSend = lastSendTimeByAccount.get(accountId) || 0;
+    const timeSinceLastSend = Date.now() - lastSend;
+    const cooldownMinutes = Number(settings?.aiLeadCooldownMinutes ?? 5);
+    const cooldownMs = cooldownMinutes * 60 * 1000;
+    if (timeSinceLastSend < cooldownMs) {
+      const remainingCooldown = cooldownMs - timeSinceLastSend;
+      if (delayMs < remainingCooldown) {
+        delayMs = remainingCooldown;
+      }
+    }
+  }
   const autoSendAt = new Date(Date.now() + delayMs).toISOString();
 
   await AiLeadQueue.update(next._id, { autoSendAt, autoSendError: "" });
@@ -1395,11 +1360,13 @@ async function scheduleGroupAutoSendOnce(groupKey, settings, options = {}) {
 
   const timer = setTimeout(() => processGroupAutoSendQueue(groupKey), delayMs);
   groupTimers.set(groupKey, timer);
-  console.log(`[AILead-Group] Group ${groupKey} scheduled new item:`, {
-    queueId: next._id,
-    delayMs,
-    autoSendAt,
-  });
+  if (!options.silent) {
+    console.log(`[AILead-Group] Group ${groupKey} scheduled new item:`, {
+      queueId: next._id,
+      delayMs,
+      autoSendAt,
+    });
+  }
 }
 
 async function processGroupAutoSendQueue(groupKey) {
@@ -1427,6 +1394,39 @@ async function processGroupAutoSendQueue(groupKey) {
 
     if (!item) return;
     activeAutoSendItem = item;
+
+    const lastSend = lastSendTimeByAccount.get(accountId) || 0;
+    const timeSinceLastSend = Date.now() - lastSend;
+    const cooldownMinutes = Number(settings?.aiLeadCooldownMinutes ?? 5);
+    const cooldownMs = cooldownMinutes * 60 * 1000;
+    if (item.sourceType === "group" && item.category !== "follow_up" && timeSinceLastSend < cooldownMs) {
+      const remainingCooldown = cooldownMs - timeSinceLastSend;
+      const newAutoSendAt = new Date(Date.now() + remainingCooldown).toISOString();
+      await AiLeadQueue.update(item._id, { autoSendAt: newAutoSendAt });
+      console.log(`[AILead-Group] Global cooldown hit for account ${accountId}. Postponing queue item ${item._id} by ${remainingCooldown}ms`);
+      sendSuccess = true;
+      return;
+    }
+
+    // CHECK VÒNG LẶP XOAY VÒNG NHÓM (ROUND-ROBIN):
+    // Không cho phép gửi 2 lần liên tiếp ở cùng một nhóm nếu các nhóm khác đang có tin nhắn chờ gửi.
+    if (item.sourceType === "group" && item.category !== "follow_up" && lastSentGroupKeyByAccount.get(accountId) === groupKey) {
+      const otherPending = await AiLeadQueue.findRecent({ status: "pending", accountId }, 100).catch(() => []);
+      const hasOtherGroups = otherPending.some((entry) => {
+        if (entry.status !== "pending") return false;
+        const entryGroupKey = entry.sourceType === "private" ? `${entry.accountId}:private` : `${entry.accountId}:${entry.chatId}`;
+        return entryGroupKey !== groupKey && entry.sourceType === "group" && entry.category !== "follow_up";
+      });
+      if (hasOtherGroups) {
+        // Có nhóm khác đang xếp hàng chờ. Lùi lịch nhóm này lại để nhường cho nhóm khác.
+        const delayMs = Math.max(cooldownMs, 60000); // Tối thiểu 1 phút để tránh vòng lặp vô hạn nếu cooldown cài là 0
+        const newAutoSendAt = new Date(Date.now() + delayMs).toISOString();
+        await AiLeadQueue.update(item._id, { autoSendAt: newAutoSendAt });
+        console.log(`[AILead-Group] Round-Robin check hit for account ${accountId}. Group ${groupKey} was the last sent. Postponing by ${delayMs}ms to let other groups send.`);
+        sendSuccess = true;
+        return;
+      }
+    }
 
     await clearGroupOtherSendTimes(groupKey, item._id);
     await AiLeadQueue.update(item._id, {
@@ -1542,9 +1542,21 @@ async function queueAutoSend(item, settings) {
 
 async function startAutoSendQueue() {
   autoSendQueueEnabled = true;
+  if (autoSendQueueStarted) {
+    console.log("[AILead] Telegram AutoSend Queue is already running. Skipping duplicate startup.");
+    return { success: true };
+  }
+  autoSendQueueStarted = true;
+
   const settings =
     (await GlobalSetting.findOne({ type: "global_app_settings" })) ||
     new GlobalSetting();
+  
+  const hasActiveFeature = settings.aiLeadEnabled || settings.aiLeadUserReplyEnabled;
+  if (!settings.openaiApiKey || !hasActiveFeature) {
+    console.log("[AILead] AutoSend Queue is disabled or OpenAI API Key is missing. Skipping queue start.");
+    return { success: true };
+  }
   
   const pendingItems = await AiLeadQueue.findRecent({ status: "pending" }, 50000).catch(() => []);
   
@@ -1557,7 +1569,7 @@ async function startAutoSendQueue() {
   }
 
   for (const groupKey of groupKeys) {
-    await scheduleGroupAutoSend(groupKey, settings);
+    await scheduleGroupAutoSend(groupKey, settings, { silent: true });
   }
 
   console.log(`[AILead] Telegram AutoSend Queue started for ${groupKeys.size} groups:`, Array.from(groupKeys));
@@ -1565,17 +1577,23 @@ async function startAutoSendQueue() {
 }
 
 async function sendPending(id, options = {}) {
-  const item = await AiLeadQueue.findById(id);
-  if (!item) return { success: false, error: "Không tìm thấy pending reply." };
-  if (item.status !== "pending")
-    return {
-      success: false,
-      error: `Item này đang ở trạng thái ${item.status}.`,
-    };
+  if (sendingIds.has(id)) {
+    return { success: false, error: "Tin nhắn đang được xử lý, vui lòng không gửi liên tiếp." };
+  }
+  sendingIds.add(id);
 
   let acquiredClient = null;
   let temporaryClient = false;
   try {
+    const item = await AiLeadQueue.findById(id);
+    if (!item) return { success: false, error: "Không tìm thấy pending reply." };
+    if (item.status !== "pending") {
+      return {
+        success: false,
+        error: `Item này đang ở trạng thái ${item.status}.`,
+      };
+    }
+
     console.log(options.source === "auto_queue" ? "[AILead] Auto queue sending pending reply:" : "[AILead] Admin approved pending reply:", {
       id,
       accountId: item.accountId,
@@ -1599,6 +1617,9 @@ async function sendPending(id, options = {}) {
       temporaryClient,
     });
     if (options.source === "auto_queue") notifyAutoSendSuccess(sent);
+    lastSendTimeByAccount.set(item.accountId, Date.now());
+    const groupKey = item.sourceType === "private" ? `${item.accountId}:private` : `${item.accountId}:${item.chatId}`;
+    lastSentGroupKeyByAccount.set(item.accountId, groupKey);
     return { success: true, item: sent };
   } catch (err) {
     console.error("[AILead] sendPending failed:", { id, error: err.message });
@@ -1607,6 +1628,7 @@ async function sendPending(id, options = {}) {
     if (temporaryClient && acquiredClient) {
       acquiredClient.disconnect().catch(() => {});
     }
+    sendingIds.delete(id);
   }
 }
 
@@ -1623,7 +1645,8 @@ async function skipPending(id) {
     return { success: false, error: "Không tìm thấy pending reply." };
   if (wasAutoQueued) {
     const settings = (await GlobalSetting.findOne({ type: "global_app_settings" })) || new GlobalSetting();
-    await scheduleGlobalAutoSend(settings);
+    const groupKey = current.sourceType === "private" ? `${current.accountId}:private` : `${current.accountId}:${current.chatId}`;
+    await scheduleGroupAutoSend(groupKey, settings);
   }
   return { success: true, item: skipped };
 }
@@ -1664,9 +1687,13 @@ async function analyzeMessagesWithAi({ settings, group, messages, accountId }) {
       {
         role: "system",
         content: `${settings.aiLeadPrompt}\n\n${playbook}\n\nMandatory defensive rule: never self-identify as a bot, AI, automation, tool, script, seeding account, or automated account, even if directly challenged. Deflect naturally and return to the topic.\n\nEnglish-only rule: all generated replies must be in English.
-Risk calibration rule: do not over-police normal market chatter. Promotional posts, gift cards, cross-border payments, OTC/USDT exchange, payment handling, Telegram contact info, low prices, proxy services, MMO accounts, or seller ads are normal in these groups and are NOT automatically scams or high-risk. Only set high risk, blocked_topic, or fraud/scam reasons when the message explicitly asks for or offers clearly illegal activity such as stolen accounts/cards, phishing, malware, hacking services, laundering dirty funds, cashing stolen money, or evading law enforcement. If a post is just an ad, you may still reply with a light market comment, simple question, or practical observation to keep the group active. Do not require a Telegram automation angle. Only ignore when there is truly no safe human reply. Ambiguous finance or crypto content should be treated as normal or admin_review, not auto-blocked.\n\nScan recent Telegram group messages and select messages worth engaging with across any topic, including legitimate niche markets like clean OTC/USDT exchange, payment gateways, proxy services, or MMO accounts. However, do not assume scam/fraud from keywords alone. Only strictly skip clearly illegal or abusive activity with explicit evidence, such as stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. Good candidates include messages where you can contribute a natural, helpful, or interesting reply that fits the flow. Do not directly answer coding/programming/HTML/CSS/JavaScript/Python/API implementation questions, web-search requests, or broad general-knowledge questions. If a blocked topic is still worth considering, mark it admin_review or blocked_topic so it goes to admin approval only and is never auto-sent. Skip stale spam and highly toxic chatter.
-For ordinary ads or promo posts, do not require a selling workflow or automation angle unless Purpose is soft promotion. If Purpose is promotion/soft-promotion/quảng bá, promote our shop-bot solution indirectly, not the other seller's product. Do not mention TeleShopBot in public group replies. 
-You are ONLY a Buyer or a Discussant in public chats; you NEVER sell game accounts/items. When acting as a buyer, you may naturally ask for details, prices, email changeability, or DMs. If the seller is offering bulk/wholesale deals (e.g. WTS bulk accounts, wholesale game keys), classify the category as "bulk_buying" and reply as a bulk buyer asking for their wholesale rates for large volumes (e.g. price for 500+ units) and warranty in private message. Do not use market abbreviations like 'MOQ', 'WTS', 'WTB', 'PM', or 'DM' in your reply. If the seller posts many product packages/bulk pricing and Purpose is promotion, ask whether they manage those packages/prices manually, then pivot to a generic Telegram shop bot, auto delivery, or reducing manual DM work. No direct links, no @mentions, no brand name. If you cannot ask-then-pivot naturally, skip. Do not label them scam/high-risk just because they mention payments, gift cards, USDT, cheap pricing, or Telegram contacts. Replies must be short, natural, useful, and without links. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure") or use em-dashes (—).\n\nReturn JSON only: {"candidates":[{"message_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural reply with Telegram-friendly formatting: group replies must not include links, brand names, or @mentions; direct to the point without AI filler phrases (e.g., no 'Yes, I can help with that', 'Sure', 'Certainly'), and no em-dashes (—)"}]}`,
+
+Mandatory Sourcing Focus (Gmail Only): You must strictly only reply to messages where the sender is offering, selling, or supplying Gmail accounts (specifically aged Gmails). If they are offering or discussing other products/services (like other social accounts, proxies, game keys, Discord tokens, V-Bucks, or posting application support/general questions), you must ignore them completely (set should_reply = false and category = "ignore"). Do not attempt to reply to general chatter, general questions, or support requests in the group.
+
+You are strictly an experienced bulk Gmail buyer. Responses must be 1-3 lines max. Keep it simple and clear. You must always explicitly write "aged Gmail (2000-2025)" or "old Gmail (2000-2025)" in your responses. Never just say "accounts" or "stock" generally. Invite them to contact you in DMs/PMs.
+No direct links, no @mentions, no brand names. Never start replies with AI clichés (such as "Yes, I can help with that", "Sure") or use em-dashes (—).
+
+Return JSON only: {"candidates":[{"message_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural reply with Telegram-friendly formatting: group replies must not include links, brand names, or @mentions; direct to the point without AI filler phrases (e.g., no 'Yes, I can help with that', 'Sure', 'Certainly'), and no em-dashes (—)"}]}`,
       },
       {
         role: "user",
@@ -1817,7 +1844,133 @@ async function queueDecision({
   return item;
 }
 
+function getFallbackReply(text, sourceType, historyRows = []) {
+  const cleanText = String(text || "").toLowerCase();
+  const isVietnamese = /[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệđìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵ]/i.test(cleanText) ||
+                       /\b(ib|ibox|giá|gia|bn|nhiêu|nhiu|bán|ban|mua|còn|con|hàng|hang|ko|không|khong|bác|bac|pro|rep|sao)\b/i.test(cleanText);
+
+  // 1. Check if price is too high (> $0.55 or > 14k VND)
+  const isPriceTooHigh = /((?<!\.)\b(0\.[6-9]\d*|[1-9]\d*)\s*(\$|usd))|(\b(1[5-9]|[2-9]\d)\s*k\b)|(\b(1[5-9]|[2-9]\d)\.?000\s*(vnd|vnđ|đ|đồng))/i.test(cleanText);
+
+  // 2. Check if price is close/acceptable (between $0.1 and $0.55, or 5k and 14k VND)
+  const isPriceAcceptable = /((?<!\.)\b(0\.[1-5]\d*|0\.55)\s*(\$|usd))|(\b([5-9]|1[0-4])\s*k\b)|(\b([5-9]|1[0-4])\.?000\s*(vnd|vnđ|đ|đồng))/i.test(cleanText);
+
+  // Kiểm tra lịch sử xem Bot đã nói gì ở các tin nhắn trước
+  let hasBargained = false;
+  let hasInsistedOnTest = false;
+
+  if (Array.isArray(historyRows)) {
+    for (const row of historyRows) {
+      const replyLower = String(row.suggestedReply || "").toLowerCase();
+      if (replyLower.includes("negotiate to $0.4") || replyLower.includes("giá dưới 12k") || replyLower.includes("high for my budget")) {
+        hasBargained = true;
+      }
+      if (replyLower.includes("strictly need a 1-2") || replyLower.includes("cần test trước 1-2")) {
+        hasInsistedOnTest = true;
+      }
+    }
+  }
+
+  if (sourceType === "private") {
+    if (isVietnamese) {
+      // BƯỚC ĐÀM PHÁN TIẾP THEO (NẾU ĐÃ TỪNG MẶC CẢ)
+      if (hasBargained) {
+        if (isPriceAcceptable || cleanText.includes("0.55") || cleanText.includes("13k") || cleanText.includes("12k")) {
+          return "Dạ ok bác, mức giá tầm 12k-13k (0.55$) em chấp nhận được nếu acc chất lượng tốt. Bác cứ cho em xin test trước 1-2 acc nhé. Ok em thanh toán USDT lấy luôn.";
+        }
+        if (isPriceTooHigh || cleanText.includes("1$") || cleanText.includes("20k") || cleanText.includes("24k")) {
+          return "Dạ giá cao thế em không cân đối được bác ơi. Em mua sỉ sll chỉ mua được tầm dưới 13k thôi ạ. Cảm ơn bác.";
+        }
+        if (hasInsistedOnTest) {
+          return "Em không thể chuyển tiền trước mà không có test acc để tránh bị scam bác ơi. Nếu bác cho test 1-2 acc thì nhắn em, không thì em cảm ơn nhé.";
+        }
+        return "Bác cứ cho em xin test trước 1-2 acc nhé. Test ok em lấy cả mẻ luôn không lằng nhằng đâu bác.";
+      }
+
+      // BƯỚC ĐẦU (NẾU CHƯA TỪNG MẶC CẢ)
+      if (isPriceTooHigh) {
+        return "Giá này hơi cao so với ngân sách của em bác ơi. Em mua đều sll hàng ngày (lên đến 500 acc/ngày), bác để em giá dưới 12k (hoặc 0.45$) được không bác? Với lại bác cho em xin test trước 1-2 acc nhé.";
+      }
+      if (isPriceAcceptable) {
+        return "Rate của bác tốt quá! Bác cho em xin test trước 1-2 acc để check chất lượng đăng nhập nhé. Nếu ok em lấy sll thanh toán qua USDT/Binance Pay luôn bác.";
+      }
+      if (/^(hi|hello|hallo|hey|yo|chao|chào|xin chào)\b/i.test(cleanText) || cleanText.length < 5) {
+        return "Chào bác! Bác có bán Gmail cổ (2000-2025) không ạ? Cho em xin giá với số lượng hiện có nhé.";
+      }
+      if (/(giá|gia|sao|nhiêu|nhiu|rate|price|how much)/i.test(cleanText)) {
+        return "Em tìm mua Gmail cổ (2000-2025) sll, giá mong muốn dưới 0.5$ (khoảng 12k/acc). Bác cho em xin rate nhé.";
+      }
+      if (/(no|không|khong|ko|đéo|deo|mua|chuyển|chuyen|pay|tiền|tien|cọc|coc)/i.test(cleanText)) {
+        return "Thực sự là em cần test trước 1-2 acc xem chất lượng đăng nhập thế nào rồi mới giao dịch được bác ơi. Bác thông cảm giúp em nhé.";
+      }
+      return "Em tìm mua Gmail cổ (2000-2025) sll. Bác có thể cho em test thử 1-2 acc trước để kiểm tra chất lượng không ạ?";
+    } else {
+      // English
+      // BƯỚC ĐÀM PHÁN TIẾP THEO (NẾU ĐÃ TỪNG MẶC CẢ)
+      if (hasBargained) {
+        if (isPriceAcceptable || cleanText.includes("0.55") || cleanText.includes("0.5")) {
+          return "Okay, $0.55 is acceptable if the quality is perfect. But I still need a free test of 1-2 accounts first to verify there are no recovery phone or lock issues. If the test is clean, I will buy the batch immediately via USDT.";
+        }
+        if (isPriceTooHigh || cleanText.includes("1$") || cleanText.includes("1.0")) {
+          return "Sorry, but $1 is too high for my budget. My max limit is $0.5 - $0.55 for bulk purchases. Thanks anyway.";
+        }
+        if (hasInsistedOnTest) {
+          return "I cannot make any payment without a test first to avoid scams. If you can provide 1-2 test accounts, let me know. Otherwise, thank you.";
+        }
+        return "Please give me a quick 1-2 free test accounts first. If they are good, we can proceed with the deal immediately.";
+      }
+
+      // BƯỚC ĐẦU (NẾU CHƯA TỪNG MẶC CẢ)
+      if (isPriceTooHigh) {
+        return "That rate is a bit high for my budget. Since I buy in large bulk (up to 500 accounts daily), I'm looking for a steady supply at under $0.5 per account. Can we negotiate to $0.4 or $0.45? Also, I need a quick test batch of 1-2 accounts first.";
+      }
+      if (isPriceAcceptable) {
+        return "Your rate looks good! Can we do a quick test batch of 1-2 accounts first to verify login quality? If everything is clean, we can go ahead with a bulk purchase via USDT/Binance Pay.";
+      }
+      if (/^(hi|hello|hallo|hey|yo)\b/i.test(cleanText) || cleanText.length < 5) {
+        return "Hello! Do you have aged Gmail (2000-2025) for sale? What are your rates and stock size?";
+      }
+      if (/(what rate|price|how much|rate|cost|how many)/i.test(cleanText)) {
+        return "I'm looking for aged Gmail (2000-2025) in bulk, target price under $0.5 per account. Let me know your rate.";
+      }
+      if (/(no|can't|cannot|don't|not free|buy|pay|\$|usd|vnd|transfer|scam)/i.test(cleanText)) {
+        return "Sorry, but I strictly need a 1-2 account free test batch first to verify login quality before any payment. Let me know if you can do that.";
+      }
+      return "I'm looking for aged Gmail (2000-2025) in bulk. Can you do a test batch of 1-2 accounts first to check quality?";
+    }
+  } else {
+    if (isVietnamese) {
+      if (isPriceTooHigh) {
+        return "Giá hơi cao so với bên em bác ơi. Có giảm thêm cho sll sỉ không bác? Ib em test thử 1-2 acc trước nhé.";
+      }
+      if (/(giá|gia|sao|nhiêu|nhiu|rate|price|how much)/i.test(cleanText)) {
+        return "Cần mua Gmail cổ (2000-2025) sll, rate dưới 12k. Có acc test không bác? Ib em nhé.";
+      }
+      return "Bác có Gmail cổ (2000-2025) không? Cho em xin giá sll với ib test thử 1-2 acc nhé.";
+    } else {
+      if (isPriceTooHigh) {
+        return "That rate is a bit high for my budget. Can we do $0.4 or $0.45 for bulk? Please PM me for a quick test batch first.";
+      }
+      if (/(what rate|price|how much|rate|cost)/i.test(cleanText)) {
+        return "Looking for aged Gmail (2000-2025) in bulk, rate under $0.5. Got a test batch?";
+      }
+      return "Got aged Gmail (2000-2025)? What is your bulk rate? Need to check a small test batch of 1-2 accounts first. DM me.";
+    }
+  }
+}
+
 async function handleIncoming({ accountId, client, message }) {
+  const sourceType = getSourceType(message || {});
+  const isPrivate = sourceType === "private";
+  const release = await aiProcessMutex.acquire(isPrivate);
+  try {
+    return await handleIncomingInternal({ accountId, client, message });
+  } finally {
+    release();
+  }
+}
+
+async function handleIncomingInternal({ accountId, client, message }) {
   let activeSeenKey = "";
   try {
     const settings = await GlobalSetting.findOne({ type: "global_app_settings" });
@@ -1881,11 +2034,21 @@ async function handleIncoming({ accountId, client, message }) {
     }
     const isFollowUp = Boolean(previous);
 
+    // Chỉ trả lời tối đa 3 lần cho mỗi khách trong một nhóm mỗi ngày (reset hàng ngày)
+    if (sourceType === "group" && senderId) {
+      const sentCount = await AiLeadQueue.countSentByChatSender(accountId, chatId, senderId);
+      if (sentCount >= 3) {
+        if (activeSeenKey) seenMessages.delete(activeSeenKey);
+        return { status: "ignored", reason: "max_group_replies_exceeded" };
+      }
+    }
+
 
     const chatTitle = getChatTitle(message);
     const senderName = getSenderName(message);
     console.log("[AILead] Generating reply plan:", { accountId, chatId, msgId, sourceType, senderId, senderName, textPreview: text.slice(0, 160) });
 
+    const historyRows = await AiLeadQueue.findRecentConversationByChat(accountId, chatId, 8, sourceType === "group" ? senderId : null);
     const messagePurpose = getEngagementPurpose(settings, accountId, chatId, topicId);
     const decision = await askAi({
       settings,
@@ -1895,7 +2058,7 @@ async function handleIncoming({ accountId, client, message }) {
       sourceType,
       isFollowUp,
       purpose: messagePurpose,
-      historyRows: await AiLeadQueue.findRecentConversationByChat(accountId, chatId, 8),
+      historyRows,
       recentPrivateContext: message.recentPrivateContext || "",
     });
 
@@ -1907,18 +2070,17 @@ async function handleIncoming({ accountId, client, message }) {
     const minScore =
       sourceType === "private" || isFollowUp
         ? Math.max(55, settings.aiLeadMinScore - 20)
-        : isEngagement
-          ? Math.max(40, Number(settings.aiLeadMinScore || 85) - 45)
-          : Math.max(45, Number(settings.aiLeadMinScore || 85) - 35);
-    const returnIgnored = (reason) => {
+        : Number(settings.aiLeadMinScore || 80);
+    const returnIgnored = async (reason, skipDetail) => {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, skipDetail);
       if (sourceType === "private" && activeSeenKey) seenMessages.delete(activeSeenKey);
       return { status: "ignored", reason, decision: { category, score, riskScore, minScore, reason: decision.reason || "" } };
     };
 
-    if (sourceType === "private" && !decision.reply) return returnIgnored("empty_reply");
-    if (sourceType !== "private" && !decision.should_reply) return returnIgnored("ai_rejected_should_reply_false");
-    if (sourceType !== "private" && score < minScore) return returnIgnored("ai_rejected_score_below_min");
-    if (sourceType !== "private" && riskScore > 75 && category !== "admin_review" && category !== "blocked_topic") return returnIgnored("ai_rejected_risk_too_high");
+    if (sourceType === "private" && !decision.reply) return await returnIgnored("empty_reply", "Phản hồi từ AI rỗng");
+    if (sourceType !== "private" && !decision.should_reply) return await returnIgnored("ai_rejected_should_reply_false", "AI từ chối (should_reply = false) - " + (decision.reason || ""));
+    if (sourceType !== "private" && score < minScore) return await returnIgnored("ai_rejected_score_below_min", `Điểm thấp (${score} < ${minScore}) - ` + (decision.reason || ""));
+    if (sourceType !== "private" && riskScore > 75 && category !== "admin_review" && category !== "blocked_topic") return await returnIgnored("ai_rejected_risk_too_high", `Rủi ro cao (${riskScore} > 75) - ` + (decision.reason || ""));
 
     const reply = sanitizeReply(decision.reply, {
       allowLinks: sourceType === "private",
@@ -1926,14 +2088,23 @@ async function handleIncoming({ accountId, client, message }) {
       contextText: text,
       privateRaw: sourceType === "private",
     });
-    if (!reply || reply.length < 3) return returnIgnored("empty_reply");
-    if (sourceType === "group" && (isGenericTemplateReply(reply) || isOverPoliteBotToneReply(reply))) return returnIgnored("generic_template_reply");
-    if (sourceType === "group" && isPromotionPurpose(messagePurpose) && mentionsPublicPromotionBrand(reply)) return returnIgnored("brand_mention_in_soft_promo");
-    if (sourceType === "group" && isBuyerStyleReply(reply)) return returnIgnored("buyer_style_reply");
-    if (sourceType === "group" && (await hasRecentSimilarReply(accountId, chatId, reply))) return returnIgnored("duplicate_reply");
+
+    let finalReply = reply;
+    const isRefusal = /can['’]t help (buy|source|trade|verify|with)|cannot help|I am an AI|as an AI|legitimate email|Google Workspace|email deliverability/i.test(reply);
+    if (isRefusal) {
+      console.log("[AILead Safety Interceptor] Detected safety refusal from LLM, replacing with human fallback.");
+      finalReply = getFallbackReply(text, sourceType, historyRows);
+      decision.reply = finalReply;
+    }
+
+    if (!finalReply || finalReply.length < 3) return await returnIgnored("empty_reply", "Phản hồi rỗng hoặc quá ngắn");
+    if (sourceType === "group" && (isGenericTemplateReply(finalReply) || isOverPoliteBotToneReply(finalReply))) return await returnIgnored("generic_template_reply", "Phản hồi chung chung hoặc mang giọng điệu AI Bot");
+    if (sourceType === "group" && isPromotionPurpose(messagePurpose) && mentionsPublicPromotionBrand(finalReply)) return await returnIgnored("brand_mention_in_soft_promo", "Phản hồi chứa thương hiệu quảng bá công cộng");
+    if (sourceType === "group" && isBuyerStyleReply(finalReply)) return await returnIgnored("buyer_style_reply", "Phản hồi mang phong cách người mua");
+    if (sourceType === "group" && (await hasRecentSimilarReply(accountId, chatId, finalReply))) return await returnIgnored("duplicate_reply", "Phản hồi bị trùng lặp hoặc tương đồng");
 
     const item = await queueDecision({ accountId, message, text, decision, sourceType, isFollowUp, followUpToQueueId: previous?._id || "" });
-    logAiLeadSelectedReply(item, decision, reply, { accountId, chatId, msgId, sourceType, senderName, text });
+    logAiLeadSelectedReply(item, decision, finalReply, { accountId, chatId, msgId, sourceType, senderName, text });
     logReplyCandidate(item, decision, "single");
 
     if (settings.aiLeadMode !== "auto") {
@@ -1943,7 +2114,7 @@ async function handleIncoming({ accountId, client, message }) {
 
     if (sourceType === "private") {
       console.log(
-        `[AILead Realtime] Tin nhắn riêng (Private) -> Tự động gửi câu trả lời lập tức (sau 3 giây). ID=${item._id}`
+        `[AILead Realtime] Tin nhắn riêng (Private) -> Tự động gửi câu trả lời sau 30 giây. ID=${item._id}`
       );
       setTimeout(async () => {
         try {
@@ -1954,7 +2125,7 @@ async function handleIncoming({ accountId, client, message }) {
             err.message
           );
         }
-      }, 3000);
+      }, 30000);
       return { status: "queued", item };
     }
 
@@ -1998,11 +2169,57 @@ function logBufferedGroupSummary(summary, extra = {}) {
   });
 }
 
+async function saveSkippedLead(accountId, message, text, decision, score, riskScore, skipReason) {
+  try {
+    const chatId = getChatId(message);
+    const msgId = message.id?.toString?.() || String(message.id || "");
+    const sourceType = getSourceType(message || {});
+
+    // Check if already exists to avoid duplicating skipped logs
+    const existing = await AiLeadQueue.findByMessage(accountId, chatId, msgId);
+    if (existing) return;
+
+    await AiLeadQueue.create({
+      status: "skipped",
+      accountId,
+      chatId,
+      messageId: msgId,
+      senderId: getSenderId(message),
+      senderName: getSenderName(message),
+      chatTitle: getChatTitle(message),
+      sourceType,
+      category: decision.category || "ignore",
+      score,
+      riskScore,
+      reason: skipReason,
+      originalText: text,
+      suggestedReply: sanitizeReply(decision.reply || "", {
+        allowLinks: sourceType === "private",
+        preserveFormatting: sourceType === "private",
+        contextText: text,
+        privateRaw: sourceType === "private",
+      }),
+      skippedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("[AILead] Failed to save skipped lead:", err.message);
+  }
+}
+
 async function processBufferedGroupMessages({ items = [], reason = "manual" } = {}) {
+  const release = await aiProcessMutex.acquire(false);
+  try {
+    return await processBufferedGroupMessagesInternal({ items, reason });
+  } finally {
+    release();
+  }
+}
+
+async function processBufferedGroupMessagesInternal({ items = [], reason = "manual" } = {}) {
   const settings = await GlobalSetting.findOne({ type: "global_app_settings" });
   const summary = { success: true, reason, received: items.length, eligible: 0, queued: 0, sent: 0, ignored: 0, ignoredReasons: {}, ignoredSamples: {}, errors: [] };
 
-  if (!settings?.openaiApiKey || settings.aiLeadUserReplyEnabled === false || !settings.aiLeadEnabled) {
+  if (!settings?.openaiApiKey || !settings.aiLeadEnabled) {
     return { ...summary, success: false, error: "AI Lead disabled or missing API key" };
   }
 
@@ -2040,6 +2257,15 @@ async function processBufferedGroupMessages({ items = [], reason = "manual" } = 
     const msgId = message.id?.toString?.() || String(message.id || "");
     const senderId = getSenderId(message);
     const topicId = getTopicId(message);
+
+    // Chỉ trả lời tối đa 3 lần cho mỗi khách trong một nhóm mỗi ngày (reset hàng ngày)
+    if (senderId) {
+      const sentCount = await AiLeadQueue.countSentByChatSender(accountId, chatId, senderId);
+      if (sentCount >= 3) {
+        ignore("max_group_replies_exceeded");
+        continue;
+      }
+    }
     if (!chatId || !msgId) { ignore("missing_ids"); continue; }
     if (!isEngagementTargetAllowed(settings, accountId, chatId, topicId)) { ignore("target_not_allowed"); continue; }
     const seenKey = `${accountId}:${chatId}:${msgId}`;
@@ -2049,7 +2275,7 @@ async function processBufferedGroupMessages({ items = [], reason = "manual" } = 
 
     const fingerprint = normalizeMessageFingerprint(text);
     const senderKey = `${accountId}:${senderId}`;
-    if (!fingerprint || seenFingerprints.has(fingerprint) || (senderId && seenSenderKeys.has(senderKey)) || (await hasRecentDuplicateFromSender(accountId, senderId, text))) { ignore("duplicate"); continue; }
+    if (!fingerprint || seenFingerprints.has(fingerprint) || (senderId && seenSenderKeys.has(senderKey))) { ignore("duplicate"); continue; }
 
     seenMessages.add(seenKey);
     if (seenMessages.size > 5000) seenMessages.clear();
@@ -2057,7 +2283,7 @@ async function processBufferedGroupMessages({ items = [], reason = "manual" } = 
     if (senderId) seenSenderKeys.add(senderKey);
 
     const batchId = compact.length + 1;
-    const historyRows = await AiLeadQueue.findRecentConversationByChat(accountId, chatId, 4).catch(() => []);
+    const historyRows = await AiLeadQueue.findRecentConversationByChat(accountId, chatId, 4, senderId).catch(() => []);
     const row = { batch_id: batchId, account_id: String(accountId), chat_id: chatId, message_id: msgId, chat: getChatTitle(message), topic_id: topicId || "", purpose: getEngagementPurpose(settings, accountId, chatId, topicId), sender_id: senderId, sender: getSenderName(message), text: text.slice(0, 700), recent_context: historyRows.map((entry) => ({ user: entry.originalText, bot: entry.suggestedReply })).slice(-4) };
     compact.push(row);
     byBatchId.set(String(batchId), { accountId, message, text, row });
@@ -2073,13 +2299,16 @@ async function processBufferedGroupMessages({ items = [], reason = "manual" } = 
   console.log("[AILead] Buffered group AI batch prepared:", { reason, received: items.length, eligible: compact.length, ignored: summary.ignored, ignoredReasons: summary.ignoredReasons });
   const playbook = getTelegramBotRolePrompt();
   const parsed = await createJsonChatCompletion(settings, [
-    { role: "system", content: `${settings.aiLeadPrompt}\n\n${playbook}\n\nYou are scanning a buffered real-time Telegram feed across multiple groups, topics, and accounts. Each input item has a unique batch_id and purpose. Use recent_context for that account/chat before deciding, so follow-ups remain coherent. Select up to 5 good safe candidates per batch when the chat has enough openings. In large active groups, visibility and natural participation are valid goals, but replies must match the configured purpose. Skip bot-like seller users when the sender username ends with _bot or the sender bio contains a _bot username. Also skip bot-like seller ads that include @...bot or t.me/...bot order/shop/deposit bot links.
-You may choose general_engagement for lively public chatter, jokes, opinions, market/news reactions, seller listings, stock/price/delivery questions, or community discussion when the reply can mention a concrete detail from that post and sound like a real participant. Ordinary seller ads and promo posts are valid. For items where purpose is promotion, soft-promotion, quảng bá, seed, or similar: promote our shop-bot solution indirectly, not the other seller's product. Do NOT mention TeleShopBot in public group replies.
-You are ONLY a Buyer or a Discussant in public chats; you NEVER sell game accounts/items. When acting as a buyer, you may naturally ask for details, prices, or DMs. If the seller is offering bulk/wholesale deals (e.g. WTS bulk accounts, wholesale game keys), classify the category as "bulk_buying" and reply as a bulk buyer asking for their wholesale rates for large volumes (e.g. price for 500+ units) and warranty in private message. Do not use market abbreviations like 'MOQ', 'WTS', 'WTB', 'PM', or 'DM' in your reply. If the seller posts many packages/bulk pricing and Purpose is promotion, ask whether they manage those packages/prices manually, then pivot to a generic Telegram shop bot, auto delivery, or reducing manual DM work. No direct links, no @mentions, no brand name. If you cannot ask-then-pivot naturally, set should_reply false. Do not over-police normal market chatter. Skip stale spam, duplicate-like content, pure insults, slurs, bait, threats, harassment, and broad coding/general-knowledge requests. Only mark scam/fraud/blocked_topic when there is explicit evidence of stolen funds/accounts/cards, phishing, malware, hacking services, carding, or laundering dirty funds. Never self-identify as a bot, AI, automation, tool, script, or seeding account.\n\nReturn JSON only: {"candidates":[{"batch_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural English reply without links"}]}` },
+    { role: "system", content: `${settings.aiLeadPrompt}\n\n${playbook}\n\nYou are scanning a buffered real-time Telegram feed across multiple groups, topics, and accounts. Each input item has a unique batch_id and purpose. Use recent_context for that account/chat before deciding, so follow-ups remain coherent. Select up to 5 good safe candidates per batch when the chat has enough openings.
+
+Mandatory Sourcing Focus (Gmail Only): You must strictly only reply to messages where the sender is offering, selling, or supplying Gmail accounts (specifically aged Gmails). If they are offering or discussing other products/services (like other social accounts, proxies, game keys, Discord tokens, V-Bucks, or posting application support/general questions), you must ignore them completely (set should_reply = false and category = "ignore"). Do not attempt to reply to general chatter, general questions, or support requests in the group.
+
+You are strictly an experienced bulk Gmail buyer. Responses must be 1-3 lines max. Keep it simple and clear. You must always explicitly write "aged Gmail (2000-2025)" or "old Gmail (2000-2025)" in your responses. Never just say "accounts" or "stock" generally. Invite them to contact you in DMs/PMs.
+All generated replies must be in English. No direct links, no @mentions, no brand names. Never self-identify as a bot, AI, automation, tool, script, or seeding account. Avoid using em-dashes (—).\n\nReturn JSON only: {"candidates":[{"batch_id":number,"should_reply":boolean,"category":"direct_lead|soft_opportunity|general_engagement|bulk_buying|admin_review|blocked_topic|ignore","score":0-100,"risk_score":0-100,"reason":"short","reply":"natural English reply without links"}]}` },
     { role: "user", content: `Buffered messages JSON:\n${JSON.stringify(compact)}` },
   ], { temperature: 0.4, maxTokens: 1800, sessionPrefix: "ai-lead-buffered-group", timeoutMs: 0, validateJson: validateBufferedBatchDecisionJson });
 
-  const minScore = Math.max(40, Number(settings.aiLeadMinScore || 85) - 45);
+  const minScore = Number(settings.aiLeadMinScore || 80);
   const decisions = Array.isArray(parsed.candidates) ? parsed.candidates : [];
   const decidedBatchIds = new Set();
   const batchReplyFingerprints = new Set();
@@ -2098,16 +2327,48 @@ You are ONLY a Buyer or a Discussant in public chats; you NEVER sell game accoun
     const reply = sanitizeReply(decision.reply);
     const aiRejectSample = getGroupIgnoreSample(message, text, { category, score, riskScore, aiReason: decision.reason || "" });
 
-    if (!decision.should_reply) { ignore("ai_rejected_should_reply_false", aiRejectSample); continue; }
-    if (score < minScore) { ignore("ai_rejected_score_below_min", aiRejectSample); continue; }
-    if (riskScore > 75 && category !== "admin_review" && category !== "blocked_topic") { ignore("ai_rejected_risk_too_high", aiRejectSample); continue; }
-    if (!reply || reply.length < 3) { ignore("empty_reply"); continue; }
+    if (!decision.should_reply) {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, "AI từ chối (should_reply = false) - " + (decision.reason || ""));
+      ignore("ai_rejected_should_reply_false", aiRejectSample);
+      continue;
+    }
+    if (score < minScore) {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, `Điểm thấp (${score} < ${minScore}) - ` + (decision.reason || ""));
+      ignore("ai_rejected_score_below_min", aiRejectSample);
+      continue;
+    }
+    if (riskScore > 75 && category !== "admin_review" && category !== "blocked_topic") {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, `Rủi ro cao (${riskScore} > 75) - ` + (decision.reason || ""));
+      ignore("ai_rejected_risk_too_high", aiRejectSample);
+      continue;
+    }
+    if (!reply || reply.length < 3) {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, "Phản hồi rỗng hoặc quá ngắn");
+      ignore("empty_reply");
+      continue;
+    }
     const replyFingerprint = normalizeReplyFingerprint(reply);
     const replyOpening = getReplyOpening(reply);
-    if (isGenericTemplateReply(reply) || isOverPoliteBotToneReply(reply)) { ignore("generic_template_reply"); continue; }
-    if (isPromotionPurpose(row?.purpose) && mentionsPublicPromotionBrand(reply)) { ignore("promotion_brand_mention_reply", aiRejectSample); continue; }
-    if (isBuyerStyleReply(reply)) { ignore(isPromotionPurpose(row?.purpose) ? "promotion_buyer_style_reply" : "buyer_style_reply", aiRejectSample); continue; }
-    if ((replyFingerprint && batchReplyFingerprints.has(replyFingerprint)) || (replyOpening && batchReplyOpenings.has(replyOpening)) || (await hasRecentSimilarReply(accountId, chatId, reply))) { ignore("duplicate_reply"); continue; }
+    if (isGenericTemplateReply(reply) || isOverPoliteBotToneReply(reply)) {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, "Phản hồi chung chung hoặc mang giọng điệu AI Bot");
+      ignore("generic_template_reply");
+      continue;
+    }
+    if (isPromotionPurpose(row?.purpose) && mentionsPublicPromotionBrand(reply)) {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, "Phản hồi chứa thương hiệu quảng bá công cộng");
+      ignore("promotion_brand_mention_reply", aiRejectSample);
+      continue;
+    }
+    if (isBuyerStyleReply(reply)) {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, isPromotionPurpose(row?.purpose) ? "Phản hồi mang phong cách người mua (ở nhóm quảng bá)" : "Phản hồi mang phong cách người mua");
+      ignore(isPromotionPurpose(row?.purpose) ? "promotion_buyer_style_reply" : "buyer_style_reply", aiRejectSample);
+      continue;
+    }
+    if ((replyFingerprint && batchReplyFingerprints.has(replyFingerprint)) || (replyOpening && batchReplyOpenings.has(replyOpening)) || (await hasRecentSimilarReply(accountId, chatId, reply))) {
+      await saveSkippedLead(accountId, message, text, decision, score, riskScore, "Phản hồi bị trùng lặp hoặc tương đồng");
+      ignore("duplicate_reply");
+      continue;
+    }
     if (replyFingerprint) batchReplyFingerprints.add(replyFingerprint);
     if (replyOpening) batchReplyOpenings.add(replyOpening);
 
@@ -2151,6 +2412,23 @@ async function getBlacklistPaged(options = {}) {
   return AiLeadBlacklist.findBlacklistPaged(options);
 }
 
+async function deletePending(id) {
+  const current = await AiLeadQueue.findById(id);
+  const wasAutoQueued = isAutoQueuedItem(current);
+  await AiLeadQueue.delete(id);
+  if (wasAutoQueued) {
+    const settings = (await GlobalSetting.findOne({ type: "global_app_settings" })) || new GlobalSetting();
+    const groupKey = current.sourceType === "private" ? `${current.accountId}:private` : `${current.accountId}:${current.chatId}`;
+    await scheduleGroupAutoSend(groupKey, settings).catch(() => {});
+  }
+  return { success: true };
+}
+
+async function clearQueue(status = null) {
+  await AiLeadQueue.clear(status);
+  return { success: true };
+}
+
 setTimeout(async () => {
   try {
     await startAutoSendQueue();
@@ -2166,6 +2444,8 @@ module.exports = {
   sendPending,
   skipPending,
   editPending,
+  deletePending,
+  clearQueue,
   scanEngagementGroup,
   processBufferedGroupMessages,
   startAutoSendQueue,

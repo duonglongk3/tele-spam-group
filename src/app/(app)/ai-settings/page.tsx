@@ -38,6 +38,7 @@ export default function AiSettingsPage() {
   const [privateScanStatus, setPrivateScanStatus] = useState('')
   const [topicsByGroup, setTopicsByGroup] = useState<Record<string, any[]>>({})
   const [loadingTopicsId, setLoadingTopicsId] = useState<string | null>(null)
+  const [testingBot, setTestingBot] = useState(false)
   const [form, setForm] = useState<any>({
     aiLeadEnabled: true,
     aiLeadMode: 'auto',
@@ -54,6 +55,9 @@ export default function AiSettingsPage() {
     aiLeadIgnoreBotLikeUsers: false,
     aiLeadEngagementGroups: [],
     aiLeadPrompt: '',
+    telegramBotToken: '',
+    telegramAdminChatId: '',
+    telegramBotUsername: '',
   })
 
   useEffect(() => { loadInitial() }, [])
@@ -67,10 +71,20 @@ export default function AiSettingsPage() {
     try {
       setLoading(true)
       const [settingsRes, accs] = await Promise.all([telegramApi.getSettings(), telegramApi.getAccounts()])
-      if (settingsRes?.success && settingsRes.settings) setForm((prev: any) => ({ ...prev, ...settingsRes.settings }))
       const connected = (accs || []).filter((acc: any) => acc.connected)
       setAccounts(connected)
       if (connected[0]) setSelectedAccId(connected[0].id)
+
+      if (settingsRes?.success && settingsRes.settings) {
+        const nextSettings = { ...settingsRes.settings }
+        if (Array.isArray(nextSettings.aiLeadEngagementGroups)) {
+          const connectedIds = new Set(connected.map((acc: any) => String(acc.id)))
+          nextSettings.aiLeadEngagementGroups = nextSettings.aiLeadEngagementGroups.filter(
+            (g: any) => connectedIds.has(String(g.accountId))
+          )
+        }
+        setForm((prev: any) => ({ ...prev, ...nextSettings }))
+      }
     } catch (e: any) { toast.error('Lỗi tải AI settings: ' + e.message) }
     finally { setLoading(false) }
   }
@@ -188,6 +202,34 @@ export default function AiSettingsPage() {
     finally { setScanningId(null) }
   }
 
+  async function testBotConfig() {
+    if (!form.telegramBotToken || !form.telegramAdminChatId) {
+      toast.error('Vui lòng nhập đầy đủ Token và Admin Chat ID để test.')
+      return
+    }
+    try {
+      setTestingBot(true)
+      const res = await fetch(`https://api.telegram.org/bot${form.telegramBotToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: form.telegramAdminChatId,
+          text: '🔔 Test kết nối Bot Telegram thành công từ trang cấu hình AI Settings!'
+        })
+      })
+      const data = await res.json()
+      if (data.ok) {
+        toast.success('Gửi tin nhắn test thành công! Hãy kiểm tra Telegram của bạn.')
+      } else {
+        toast.error('Lỗi từ Telegram: ' + (data.description || 'Không rõ'))
+      }
+    } catch (e: any) {
+      toast.error('Lỗi kết nối API Telegram: ' + e.message)
+    } finally {
+      setTestingBot(false)
+    }
+  }
+
   if (loading) return <div className="p-10 flex justify-center"><Loader2 className="w-8 h-8 animate-spin text-blue-500" /></div>
 
   return (
@@ -220,6 +262,50 @@ export default function AiSettingsPage() {
               <div><label className="block text-xs font-medium text-gray-500 mb-1">Random queue min phút</label><input type="number" min="0" className="w-full p-2.5 border rounded-lg text-sm" value={form.aiLeadAutoSendMinDelayMinutes ?? 15} onChange={e => setForm({ ...form, aiLeadAutoSendMinDelayMinutes: Number(e.target.value), aiLeadAutoSendDelayMinutes: Number(e.target.value) })} /></div>
               <div><label className="block text-xs font-medium text-gray-500 mb-1">Random queue max phút</label><input type="number" min="0" className="w-full p-2.5 border rounded-lg text-sm" value={form.aiLeadAutoSendMaxDelayMinutes ?? 30} onChange={e => setForm({ ...form, aiLeadAutoSendMaxDelayMinutes: Number(e.target.value) })} /></div>
               <div className="col-span-2 text-xs text-gray-500">Auto mode luôn add vào queue chung cho mọi account. Ví dụ 15-30 phút nghĩa là gửi 1 tin, rồi chờ random 15-30 phút mới gửi tin tiếp theo.</div>
+            </div>
+          </Card>
+
+          <Card className="p-5 space-y-4">
+            <h2 className="font-bold flex items-center gap-2"><Send className="w-5 h-5 text-[#24A1DE]" /> Bot Telegram nhận thông báo</h2>
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Telegram Bot Token</label>
+                <input 
+                  type="text" 
+                  placeholder="5000000000:AA... (Token từ @BotFather)" 
+                  className="w-full p-2.5 border rounded-lg text-sm" 
+                  value={form.telegramBotToken || ''} 
+                  onChange={e => setForm({ ...form, telegramBotToken: e.target.value })} 
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Admin Chat ID</label>
+                <input 
+                  type="text" 
+                  placeholder="Ví dụ: 123456789 (ID nhận đề xuất duyệt)" 
+                  className="w-full p-2.5 border rounded-lg text-sm" 
+                  value={form.telegramAdminChatId || ''} 
+                  onChange={e => setForm({ ...form, telegramAdminChatId: e.target.value })} 
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 mb-1">Username của Bot (Không chứa @)</label>
+                <input 
+                  type="text" 
+                  placeholder="Ví dụ: my_tele_shop_bot" 
+                  className="w-full p-2.5 border rounded-lg text-sm" 
+                  value={form.telegramBotUsername || ''} 
+                  onChange={e => setForm({ ...form, telegramBotUsername: e.target.value })} 
+                />
+              </div>
+              <button 
+                type="button" 
+                onClick={testBotConfig} 
+                disabled={testingBot || !form.telegramBotToken || !form.telegramAdminChatId} 
+                className="w-full border bg-white hover:bg-gray-50 text-gray-700 text-sm rounded-lg px-3 py-2 flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {testingBot ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Test gửi tin nhắn
+              </button>
             </div>
           </Card>
 

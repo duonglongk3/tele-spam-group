@@ -420,6 +420,24 @@ ipcMain.handle("aiLead:editPending", async (_, { id, text }) => {
   }
 });
 
+ipcMain.handle("aiLead:deleteQueueItem", async (_, { id }) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return await aiLeadService.deletePending(id);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("aiLead:clearQueue", async (_, { status } = {}) => {
+  try {
+    const aiLeadService = require("./aiLeadService");
+    return await aiLeadService.clearQueue(status);
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 ipcMain.handle("aiLead:getBlacklist", async () => {
   try {
     const aiLeadService = require("./aiLeadService");
@@ -939,6 +957,12 @@ app.whenReady().then(async () => {
 
   await initStore();
 
+  // Verify Python dependencies (opentele, telethon, cryptography)
+  const pythonService = require("./pythonService");
+  pythonService
+    .checkAndInstallDependencies((msg) => console.log(`[PythonEnv] ${msg}`))
+    .catch((err) => console.error("[PythonEnv] Dependency check error:", err.message));
+
   // Telegram Background Services
   const telegramService = require("./telegramService");
   telegramService
@@ -1001,13 +1025,20 @@ ipcMain.handle("settings:save", async (_, data) => {
     GlobalSetting.applyTelegramClientEnv(s.toObject());
     try {
       const telegramService = require("./telegramService");
-      if (s.aiLeadUserReplyEnabled !== false) {
+      if (s.aiLeadUserReplyEnabled === true && s.openaiApiKey) {
         telegramService.startAiLeadPrivateInboxWatcher().catch((err) => console.error("[AILead] Watcher start error:", err.message));
       } else {
         telegramService.stopAiLeadPrivateInboxWatcher();
       }
+      
+      const aiLeadService = require("./aiLeadService");
+      if (s.openaiApiKey && (s.aiLeadEnabled || s.aiLeadUserReplyEnabled)) {
+        // Reset the start guard to allow starting if it was skipped on boot
+        // (If it is already running, startAutoSendQueue handles it internally)
+        aiLeadService.startAutoSendQueue().catch((err) => console.error("[AILead] Queue start error:", err.message));
+      }
     } catch (watcherErr) {
-      console.error("[AILead] Watcher apply error:", watcherErr.message);
+      console.error("[AILead] Service toggle apply error:", watcherErr.message);
     }
     return {
       success: true,
