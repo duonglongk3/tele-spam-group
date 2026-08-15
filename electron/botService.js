@@ -846,25 +846,43 @@ Lệnh:
 
   if (setupWebhook) {
     const baseUrl = (setting.telegramWebhookUrl || '').trim().replace(/\/$/, '');
-    if (baseUrl && baseUrl.startsWith('https://')) {
-      const webhookUrl = `${baseUrl}/webhook`;
-      await bot.telegram.setWebhook(webhookUrl);
-      console.log(`[Telegram Bot] Webhook set to ${webhookUrl}`);
-      startWebhookServer(3000);
-      if (adminChatId && !silent) {
-        bot.telegram.sendMessage(adminChatId, '🤖 Bot đã kết nối webhook qua cổng 3000.').catch(e => {});
-      }
-    } else {
+    const startLongPolling = async (reason) => {
       if (webhookServer) {
         webhookServer.close(() => { console.log('[Webhook Server] Stopped.'); });
         webhookServer = null;
       }
       await bot.telegram.deleteWebhook();
       await bot.launch();
-      console.log('[Telegram Bot] Started with long polling because Webhook URL is empty.');
+      console.log(`[Telegram Bot] Started with long polling${reason ? `: ${reason}` : '.'}`);
       if (adminChatId && !silent) {
-        bot.telegram.sendMessage(adminChatId, '🤖 Bot đã khởi động bằng Long Polling vì chưa cấu hình Webhook URL.').catch(e => {});
+        bot.telegram.sendMessage(
+          adminChatId,
+          '🤖 Bot đã chuyển sang Long Polling vì Webhook không khả dụng.',
+        ).catch(() => {});
       }
+    };
+
+    const isDevelopment = process.defaultApp || process.env.NODE_ENV === 'development';
+
+    if (isDevelopment) {
+      await startLongPolling('development mode');
+    } else if (baseUrl && baseUrl.startsWith('https://')) {
+      const webhookUrl = `${baseUrl}/webhook`;
+      try {
+        await bot.telegram.setWebhook(webhookUrl);
+        console.log(`[Telegram Bot] Webhook set to ${webhookUrl}`);
+        startWebhookServer(3000);
+        if (adminChatId && !silent) {
+          bot.telegram.sendMessage(adminChatId, '🤖 Bot đã kết nối webhook qua cổng 3000.').catch(() => {});
+        }
+      } catch (webhookErr) {
+        console.warn(
+          `[Telegram Bot] Webhook unavailable (${webhookErr.message}). Falling back to long polling.`,
+        );
+        await startLongPolling('webhook URL could not be registered');
+      }
+    } else {
+      await startLongPolling('Webhook URL is empty');
     }
   } else {
     console.log('[Telegram Bot] Initialized for webhook update handling without resetting webhook');

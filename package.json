@@ -5,7 +5,7 @@
   "description": "Telegram Auto Post & Management Desktop Tool",
   "main": "electron/main.js",
   "scripts": {
-    "dev": "concurrently \"npm run next:dev\" \"npm run electron:dev\"",
+    "dev": "concurrently --kill-others \"npm run next:dev\" \"npm run electron:dev\"",
     "next:dev": "next dev --port 3000",
     "next:build": "next build",
     "electron:dev": "wait-on http://localhost:3000 && electron .",

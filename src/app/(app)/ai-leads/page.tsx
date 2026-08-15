@@ -40,6 +40,7 @@ type QueueItem = {
   suggestedReply: string
   autoSendAt?: string
   autoSendScheduledAt?: string
+  autoSendError?: string
   adminNotifiedAt?: string
   sentAt?: string
   skippedAt?: string
@@ -53,6 +54,13 @@ type BlacklistItem = {
   score: number
   reason: string
   addedAt: string
+}
+
+function formatAutoSendError(error: string) {
+  if (error.includes('ALLOW_PAYMENT_REQUIRED')) {
+    return 'Group này yêu cầu trả phí để gửi tin nhắn. Hệ thống không tự động thanh toán nên đề xuất đã được bỏ qua.'
+  }
+  return error
 }
 
 export default function AiLeadsPage() {
@@ -718,6 +726,11 @@ export default function AiLeadsPage() {
                 {item.reason && (
                   <div className="text-xs text-gray-500 bg-gray-50 px-2.5 py-1.5 rounded border border-dashed">
                     <span className="font-semibold">AI phân tích:</span> {item.reason}
+                  </div>
+                )}
+                {item.status === 'skipped' && item.autoSendError && (
+                  <div className="text-xs text-red-700 bg-red-50 px-2.5 py-1.5 rounded border border-red-200">
+                    <span className="font-semibold">Lý do gửi thất bại:</span> {formatAutoSendError(item.autoSendError)}
                   </div>
                 )}
               </div>

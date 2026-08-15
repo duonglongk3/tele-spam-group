@@ -13,6 +13,11 @@ const {
 } = require("electron");
 const path = require("path");
 
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
+
 // Cấu hình Scheme bảo mật app:// cho NextJS
 protocol.registerSchemesAsPrivileged([
   {
@@ -52,6 +57,13 @@ async function initStore() {
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
 let mainWindow = null;
 let tray = null;
+
+app.on("second-instance", () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({

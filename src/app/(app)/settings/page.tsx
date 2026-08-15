@@ -22,7 +22,7 @@ export default function SettingsPage() {
     telegramBotUsername: '',
     openaiApiKey: '',
     aiApiUrl: 'https://api.openai.com/v1',
-    aiModel: 'claude_sonet_4.5',
+    aiModel: 'gpt-4o-mini',
     telegramApiId: '2040',
     telegramApiHash: 'b18441a1ff607e10a989891a5462e627',
     telegramDeviceModel: 'Desktop',
@@ -48,8 +48,8 @@ export default function SettingsPage() {
           telegramPairToken: res.settings.telegramPairToken || '',
           telegramBotUsername: res.settings.telegramBotUsername || '',
           openaiApiKey: res.settings.openaiApiKey || '',
-          aiApiUrl: res.settings.aiApiUrl || 'https://api.openai.com/v1',
-          aiModel: res.settings.aiModel || 'claude_sonet_4.5',
+          aiApiUrl: 'https://api.openai.com/v1',
+          aiModel: 'gpt-4o-mini',
           telegramApiId: res.settings.telegramApiId || '2040',
           telegramApiHash: res.settings.telegramApiHash || 'b18441a1ff607e10a989891a5462e627',
           telegramDeviceModel: res.settings.telegramDeviceModel || 'Desktop',
@@ -327,16 +327,16 @@ export default function SettingsPage() {
           </div>
 
           <div className="pt-2 space-y-3">
-            <label className="block text-sm font-semibold">5. AI API Core</label>
-            <p className="text-xs text-gray-500">Dùng OpenAI-compatible endpoint. Ví dụ custom core: https://.../v1, model claude_sonet_4.5.</p>
+            <label className="block text-sm font-semibold">5. OpenAI API</label>
+            <p className="text-xs text-gray-500">Hệ thống chỉ sử dụng OpenAI chính thức với model gpt-4o-mini.</p>
             <div>
               <label className="block text-xs font-medium text-gray-500 mb-1">AI API URL</label>
               <input
                 type="text"
                 placeholder="https://api.openai.com/v1"
                 className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                value={form.aiApiUrl}
-                onChange={e => setForm({...form, aiApiUrl: e.target.value})}
+                value="https://api.openai.com/v1"
+                readOnly
               />
             </div>
             <div className="grid gap-3 md:grid-cols-2">
@@ -344,7 +344,7 @@ export default function SettingsPage() {
                 <label className="block text-xs font-medium text-gray-500 mb-1">AI API Key</label>
                 <input
                   type="password"
-                  placeholder="hello-im-stondy / sk-..."
+                  placeholder="sk-..."
                   className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   value={form.openaiApiKey}
                   onChange={e => setForm({...form, openaiApiKey: e.target.value})}
@@ -354,10 +354,10 @@ export default function SettingsPage() {
                 <label className="block text-xs font-medium text-gray-500 mb-1">AI Model</label>
                 <input
                   type="text"
-                  placeholder="claude_sonet_4.5"
+                  placeholder="gpt-4o-mini"
                   className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  value={form.aiModel}
-                  onChange={e => setForm({...form, aiModel: e.target.value})}
+                  value="gpt-4o-mini"
+                  readOnly
                 />
               </div>
             </div>

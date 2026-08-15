@@ -83,6 +83,23 @@ class AiLeadQueue {
     );
   }
 
+  static async findLatestNumericMessageId(accountId, chatId) {
+    const rows = await all(
+      `SELECT data FROM ai_lead_queue WHERE accountId = ? AND chatId = ?`,
+      [String(accountId), String(chatId)],
+    );
+    let latest = 0;
+    for (const row of rows) {
+      const item = rowToItem(row);
+      if (!item || item.sourceType !== "group") continue;
+      const messageId = Number(item.messageId);
+      if (Number.isSafeInteger(messageId) && messageId > latest) {
+        latest = messageId;
+      }
+    }
+    return latest;
+  }
+
   static async findRecent(filter = {}, limit = 10) {
     const clauses = [];
     const params = [];
@@ -195,19 +212,12 @@ class AiLeadQueue {
         return true;
       })
       .sort((a, b) => {
-        if (status === 'sent') {
-          const aSent = Date.parse(a.sentAt || a.updatedAt || "") || 0;
-          const bSent = Date.parse(b.sentAt || b.updatedAt || "") || 0;
-          return bSent - aSent;
-        }
-        if (status === 'skipped') {
-          const aSkipped = Date.parse(a.skippedAt || a.updatedAt || "") || 0;
-          const bSkipped = Date.parse(b.skippedAt || b.updatedAt || "") || 0;
-          return bSkipped - aSkipped;
-        }
         const aCreated = Date.parse(a.createdAt || "") || 0;
         const bCreated = Date.parse(b.createdAt || "") || 0;
-        return bCreated - aCreated;
+        if (aCreated !== bCreated) return bCreated - aCreated;
+        const aUpdated = Date.parse(a.updatedAt || "") || 0;
+        const bUpdated = Date.parse(b.updatedAt || "") || 0;
+        return bUpdated - aUpdated;
       });
     const total = sorted.length;
     return {
@@ -263,12 +273,23 @@ class AiLeadQueue {
   static async countSentByChatSender(accountId, chatId, senderId) {
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
-    const todayISO = todayStart.toISOString();
-    const row = await get(
-      `SELECT COUNT(*) AS count FROM ai_lead_queue WHERE accountId = ? AND chatId = ? AND senderId = ? AND status = 'sent' AND sentAt >= ?`,
-      [String(accountId), String(chatId), String(senderId || ""), todayISO]
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+    const rows = await all(
+      `SELECT data FROM ai_lead_queue WHERE accountId = ? AND chatId = ? AND senderId = ? AND status = 'sent'`,
+      [String(accountId), String(chatId), String(senderId || "")],
     );
-    return Number(row?.count || 0);
+    return rows
+      .map(rowToItem)
+      .filter(Boolean)
+      .filter((item) => {
+        const sentAt = Date.parse(item.sentAt || "");
+        return (
+          Number.isFinite(sentAt) &&
+          sentAt >= todayStart.getTime() &&
+          sentAt < tomorrowStart.getTime()
+        );
+      }).length;
   }
 
   static async findRecentSentByChat(accountId, chatId, limit = 10) {

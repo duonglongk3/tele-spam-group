@@ -43,6 +43,7 @@ export default function AiSettingsPage() {
     aiLeadEnabled: true,
     aiLeadMode: 'auto',
     aiLeadUserReplyEnabled: true,
+    aiLeadMentionDmEnabled: true,
     aiLeadMinScore: 85,
     aiLeadMaxRepliesPerDay: 500,
     aiLeadMaxRepliesPerGroupPerDay: 200,
@@ -55,6 +56,9 @@ export default function AiSettingsPage() {
     aiLeadIgnoreBotLikeUsers: false,
     aiLeadEngagementGroups: [],
     aiLeadPrompt: '',
+    openaiApiKey: '',
+    aiApiUrl: 'https://api.openai.com/v1',
+    aiModel: 'gpt-4o-mini',
     telegramBotToken: '',
     telegramAdminChatId: '',
     telegramBotUsername: '',
@@ -76,7 +80,11 @@ export default function AiSettingsPage() {
       if (connected[0]) setSelectedAccId(connected[0].id)
 
       if (settingsRes?.success && settingsRes.settings) {
-        const nextSettings = { ...settingsRes.settings }
+        const nextSettings = {
+          ...settingsRes.settings,
+          aiApiUrl: 'https://api.openai.com/v1',
+          aiModel: 'gpt-4o-mini',
+        }
         if (Array.isArray(nextSettings.aiLeadEngagementGroups)) {
           const connectedIds = new Set(connected.map((acc: any) => String(acc.id)))
           nextSettings.aiLeadEngagementGroups = nextSettings.aiLeadEngagementGroups.filter(
@@ -144,9 +152,18 @@ export default function AiSettingsPage() {
   }
 
   async function saveSettings() {
+    if (form.aiLeadEnabled && !String(form.openaiApiKey || '').trim()) {
+      toast.error('Vui lòng nhập OpenAI API Key để bật AI watcher.')
+      return
+    }
     try {
       setSaving(true)
-      const res = await telegramApi.saveSettings(form)
+      const res = await telegramApi.saveSettings({
+        ...form,
+        openaiApiKey: String(form.openaiApiKey || '').trim(),
+        aiApiUrl: 'https://api.openai.com/v1',
+        aiModel: 'gpt-4o-mini',
+      })
       if (res?.success) {
         toast.success('Đã lưu AI Settings')
         if (form.aiLeadUserReplyEnabled !== false) {
@@ -250,6 +267,7 @@ export default function AiSettingsPage() {
             <h2 className="font-bold flex items-center gap-2"><ShieldCheck className="w-5 h-5 text-emerald-600" /> Cấu hình AI</h2>
             <label className="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg border"><span className="text-sm font-medium">Bật AI watcher</span><input type="checkbox" checked={!!form.aiLeadEnabled} onChange={e => setForm({ ...form, aiLeadEnabled: e.target.checked })} /></label>
             <label className="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg border"><span><span className="block text-sm font-medium">Trả lời tin nhắn user</span><span className="block text-xs text-gray-500">Bật riêng mục này là đủ cho private inbox. Không cần bật AI watcher hoặc chọn group.</span></span><input type="checkbox" checked={form.aiLeadUserReplyEnabled !== false} onChange={e => setForm({ ...form, aiLeadUserReplyEnabled: e.target.checked })} /></label>
+            <label className="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg border"><span><span className="block text-sm font-medium">DM seller nhắc tên tài khoản</span><span className="block text-xs text-gray-500">Chỉ tự động nhắn riêng seller đạt chuẩn khi họ nhắc tên tài khoản trong các group đã chọn.</span></span><input type="checkbox" checked={form.aiLeadMentionDmEnabled !== false} onChange={e => setForm({ ...form, aiLeadMentionDmEnabled: e.target.checked })} /></label>
             <label className="flex items-center justify-between gap-3 p-3 bg-gray-50 rounded-lg border"><span><span className="block text-sm font-medium">Bỏ qua user giống Telegram bot</span><span className="block text-xs text-gray-500">Nếu content hoặc profile có username dạng stondystoreBot, *_bot, hoặc kết thúc bằng bot thì bỏ qua.</span></span><input type="checkbox" checked={!!form.aiLeadIgnoreBotLikeUsers} onChange={e => setForm({ ...form, aiLeadIgnoreBotLikeUsers: e.target.checked })} /></label>
             <button onClick={scanUnreadPrivate} disabled={scanningPrivate || form.aiLeadUserReplyEnabled === false} className="w-full border bg-white hover:bg-gray-50 text-gray-700 text-sm rounded-lg px-3 py-2 flex items-center justify-center gap-2 disabled:opacity-50">
               {scanningPrivate ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />} Quét tin nhắn riêng chưa đọc
@@ -262,6 +280,32 @@ export default function AiSettingsPage() {
               <div><label className="block text-xs font-medium text-gray-500 mb-1">Random queue min phút</label><input type="number" min="0" className="w-full p-2.5 border rounded-lg text-sm" value={form.aiLeadAutoSendMinDelayMinutes ?? 15} onChange={e => setForm({ ...form, aiLeadAutoSendMinDelayMinutes: Number(e.target.value), aiLeadAutoSendDelayMinutes: Number(e.target.value) })} /></div>
               <div><label className="block text-xs font-medium text-gray-500 mb-1">Random queue max phút</label><input type="number" min="0" className="w-full p-2.5 border rounded-lg text-sm" value={form.aiLeadAutoSendMaxDelayMinutes ?? 30} onChange={e => setForm({ ...form, aiLeadAutoSendMaxDelayMinutes: Number(e.target.value) })} /></div>
               <div className="col-span-2 text-xs text-gray-500">Auto mode luôn add vào queue chung cho mọi account. Ví dụ 15-30 phút nghĩa là gửi 1 tin, rồi chờ random 15-30 phút mới gửi tin tiếp theo.</div>
+            </div>
+          </Card>
+
+          <Card className="p-5 space-y-4">
+            <h2 className="font-bold flex items-center gap-2"><Bot className="w-5 h-5 text-emerald-600" /> OpenAI</h2>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="rounded-lg border bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">Nhà cung cấp</div>
+                <div className="font-semibold mt-1">OpenAI chính thức</div>
+              </div>
+              <div className="rounded-lg border bg-gray-50 p-3">
+                <div className="text-xs text-gray-500">Model</div>
+                <div className="font-semibold mt-1">gpt-4o-mini</div>
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-500 mb-1">OpenAI API Key</label>
+              <input
+                type="password"
+                autoComplete="off"
+                placeholder="sk-proj-..."
+                className="w-full p-2.5 border rounded-lg text-sm"
+                value={form.openaiApiKey || ''}
+                onChange={e => setForm({ ...form, openaiApiKey: e.target.value })}
+              />
+              <p className="text-xs text-gray-500 mt-1.5">Key được lưu trong cấu hình cục bộ. Hệ thống chỉ gọi OpenAI cho tin group có chứa Gmail.</p>
             </div>
           </Card>
 

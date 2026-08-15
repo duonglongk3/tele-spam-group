@@ -1,9 +1,18 @@
-function getAiBaseUrl(settings = {}) {
-  return String(settings.aiApiUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
+const OPENAI_BASE_URL = 'https://api.openai.com/v1';
+const OPENAI_MODEL = 'gpt-4o-mini';
+
+function getAiBaseUrl() {
+  return OPENAI_BASE_URL;
 }
 
-function getAiModel(settings = {}) {
-  return settings.aiModel || 'claude_sonet_4.5';
+function getAiModel() {
+  return OPENAI_MODEL;
+}
+
+function sanitizeAiErrorText(value) {
+  return String(value || '')
+    .replace(/\b(?:sk|pp__)[A-Za-z0-9_*.-]{8,}\b/g, '[REDACTED_API_KEY]')
+    .slice(0, 300);
 }
 
 function parseAiResponse(text) {
@@ -117,34 +126,31 @@ async function createChatCompletion(settings, messages, options = {}) {
       responseFormat,
       timeoutMs = 0,
     } = options;
-    const sessionId = `${sessionPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    const body = {
-      model: getAiModel(settings),
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-      sessionId,
-    };
-    if (responseFormat) body.response_format = responseFormat;
-
-    const fetchOptions = {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${settings.openaiApiKey}`,
-        'X-Session-Id': sessionId,
-      },
-      body: JSON.stringify(body),
-    };
-    if (Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0) {
-      fetchOptions.signal = AbortSignal.timeout(Number(timeoutMs));
-    }
-
+    const selectedModel = getAiModel();
+    let sessionId = `${sessionPrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const maxRetries = 3;
     let delay = 1500;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        const body = {
+          model: selectedModel,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+        };
+        if (responseFormat) body.response_format = responseFormat;
+        const fetchOptions = {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${settings.openaiApiKey}`,
+          },
+          body: JSON.stringify(body),
+        };
+        if (Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0) {
+          fetchOptions.signal = AbortSignal.timeout(Number(timeoutMs));
+        }
         const response = await fetch(`${getAiBaseUrl(settings)}/chat/completions`, fetchOptions);
         const raw = await response.text();
 
@@ -158,14 +164,16 @@ async function createChatCompletion(settings, messages, options = {}) {
 
         const json = parseAiResponse(raw);
         if (!response.ok) {
-          throw new Error(`AI API ${response.status} ${response.statusText}: ${raw.slice(0, 300)}`);
+          throw new Error(
+            `AI API ${response.status} ${response.statusText}: ${sanitizeAiErrorText(raw)}`,
+          );
         }
 
         return {
           raw,
           json,
           content: json?.choices?.[0]?.message?.content || raw,
-          model: getAiModel(settings),
+          model: selectedModel,
           sessionId,
         };
       } catch (err) {

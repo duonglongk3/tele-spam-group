@@ -127,6 +127,16 @@ async function migrate() {
   `);
 
   await run(`
+    CREATE TABLE IF NOT EXISTS ai_lead_group_cursors (
+      accountId TEXT NOT NULL,
+      chatId TEXT NOT NULL,
+      messageId INTEGER NOT NULL DEFAULT 0,
+      updatedAt TEXT NOT NULL,
+      PRIMARY KEY (accountId, chatId)
+    )
+  `);
+
+  await run(`
     CREATE TABLE IF NOT EXISTS ai_lead_blacklist (
       id TEXT PRIMARY KEY,
       accountId TEXT NOT NULL,

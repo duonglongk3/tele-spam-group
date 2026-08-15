@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  distDir: process.env.NODE_ENV === 'development' ? '.next-dev' : '.next',
   // In Electron production mode, use static export
   // For development, keep server mode
   ...(process.env.ELECTRON_BUILD === 'true' ? { output: 'export' } : {}),

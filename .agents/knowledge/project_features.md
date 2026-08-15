@@ -6,7 +6,7 @@ This document outlines the requirements and system goals for sourcing vintage/ag
 
 ## 1. Bulk Procurement Scale & Pricing
 * **Target Pricing**: Maximum target price is $0.5 per account.
-* **Procurement Volume**: Up to 500 accounts daily, requiring long-term, stable bulk suppliers.
+* **Procurement Volume**: Unlimited daily purchasing capacity. The buyer continuously takes all available qualified wholesale stock from long-term, stable suppliers.
 * **Payment Ready**: Fast checkout via USDT or Binance Pay upon verification.
 
 ---

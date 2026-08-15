@@ -1,12 +1,29 @@
 const AI_LEAD_GROUP_BUFFER_BATCH_SIZE = 3;
-const AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS = 60000;
-const AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS = 5000;
+const AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS = 10000;
+const AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS = 2000;
 const AI_LEAD_GROUP_MAX_PARALLEL_FLUSHES = 5;
+const AI_LEAD_STARTUP_INITIAL_LOOKBACK = 10;
+const AI_LEAD_STARTUP_AI_BATCH_SIZE = 50;
+const AI_LEAD_STARTUP_MAX_MESSAGES_PER_GROUP = 50;
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const { NewMessage } = require('telegram/events');
 const TelegramAccount = require('./models/TelegramAccount');
+const AiLeadQueue = require('./models/AiLeadQueue');
+const AiLeadGroupCursor = require('./models/AiLeadGroupCursor');
+
+function containsGmailKeyword(text) {
+    const normalized = String(text || '')
+        .normalize('NFKC')
+        .toLowerCase();
+    return /(^|[^a-z0-9])g[\s._-]*mail([^a-z0-9]|$)/i.test(normalized);
+}
+
+function isRetryableAiError(error) {
+    const message = String(error?.message || error || '');
+    return !/400|401|403|invalid_api_key|invalid_request_error|incorrect api key|unrecognized request argument|insufficient_quota|billing/i.test(message);
+}
 
 function getTelegramApiId() {
     return Number(process.env.TELEGRAM_API_ID || 2040);
@@ -19,6 +36,9 @@ function getTelegramApiHash() {
 function getClientOptions(overrides = {}) {
     return {
         connectionRetries: 5,
+        reconnectRetries: 100,
+        retryDelay: 1000,
+        autoReconnect: true,
         deviceModel: process.env.TELEGRAM_DEVICE_MODEL || 'Desktop',
         systemVersion: process.env.TELEGRAM_SYSTEM_VERSION || 'Windows 10',
         appVersion: process.env.TELEGRAM_APP_VERSION || 'Telegram Desktop 6.9.3 x64',
@@ -70,13 +90,35 @@ class TelegramMultiClient {
         }
     }
 
+    async isSelectedAiLeadGroup(accountId, message) {
+        const chatId = String(
+            message?.chatId?.toString?.() ||
+            message?.peerId?.channelId?.toString?.() ||
+            message?.peerId?.chatId?.toString?.() ||
+            '',
+        ).replace(/^-100/, '');
+        if (!chatId) return false;
+        const settings = await require('./models/Setting').findOne({
+            type: 'global_app_settings',
+        }).catch(() => null);
+        if (!settings?.aiLeadEnabled || !settings.openaiApiKey) return false;
+        const groups = Array.isArray(settings.aiLeadEngagementGroups)
+            ? settings.aiLeadEngagementGroups
+            : [];
+        return groups.some((group) =>
+            String(group.accountId) === String(accountId) &&
+            String(group.chatId || '').replace(/^-100/, '') === chatId
+        );
+    }
+
     registerIncomingHandlers(client, accountId, me) {
         client.addEventHandler(async (event) => {
             try {
                 const msg = event.message;
                 if (!msg || msg.out) return;
 
-                const isPrivate = msg.isPrivate || msg.peerId?.userId;
+                const isPrivate = Boolean(msg.isPrivate || msg.peerId?.userId);
+                const isSelectedGroup = !isPrivate && await this.isSelectedAiLeadGroup(accountId, msg);
 
                 if (isPrivate) {
                     const privateChatId = msg.peerId?.userId?.toString?.() || msg.senderId?.toString?.() || msg.sender?.id?.toString?.() || msg.chatId?.toString?.() || '';
@@ -94,22 +136,45 @@ class TelegramMultiClient {
                         this.privateDebounceTimers.set(debounceKey, timer);
                         console.log('[AILead] Realtime private message debounced:', { accountId, chatId: privateChatId, messageId: msg.id, waitMs: 60000 });
                     }
-                } else {
+                } else if (isSelectedGroup) {
                     this.enqueueAiLeadGroupMessage({ accountId, client, message: msg });
                 }
 
                 if (msg.mentioned) {
+                    const sender = msg.sender ||
+                        (typeof msg.getSender === 'function'
+                            ? await msg.getSender().catch(() => null)
+                            : null);
+                    const chat = msg.chat ||
+                        (typeof msg.getChat === 'function'
+                            ? await msg.getChat().catch(() => null)
+                            : null);
                     const text = msg.message || '[Có đính kèm file/ảnh]';
-                    const senderName = msg.sender ? (msg.sender.firstName || msg.sender.username || 'Ai đó') : 'Khách';
+                    const senderName = sender ? (sender.firstName || sender.username || 'Ai đó') : 'Khách';
                     let groupName = 'Nhóm/Chat Cá Nhân';
-                    if (msg.chat && msg.chat.title) groupName = msg.chat.title;
+                    if (chat && chat.title) groupName = chat.title;
 
                     let messageLink = '';
-                    if (msg.chat && msg.chat.username) {
-                        messageLink = `\n👉 Link tin nhắn: https://t.me/${msg.chat.username}/${msg.id}`;
-                    } else if (msg.chatId) {
-                        let cleanId = msg.chatId.toString().replace('-100', '');
-                        messageLink = `\n👉 Link (Private): https://t.me/c/${cleanId}/${msg.id}`;
+                    if (chat && chat.username) {
+                        messageLink = `\n👉 Link tin nhắn: https://t.me/${chat.username}/${msg.id}`;
+                    } else if (!isPrivate && msg.chatId) {
+                        const cleanId = msg.chatId.toString().replace(/^-100/, '').replace(/^-/, '');
+                        messageLink = `\n👉 Link tin nhắn: https://t.me/c/${cleanId}/${msg.id}`;
+                    }
+
+                    if (isSelectedGroup) {
+                        const settings = await require('./models/Setting').findOne({
+                            type: 'global_app_settings',
+                        }).catch(() => null);
+                        if (settings?.aiLeadMentionDmEnabled !== false) {
+                            const aiLeadService = require('./aiLeadService');
+                            await aiLeadService.sendMentionDm({
+                                accountId,
+                                client,
+                                message: msg,
+                                text,
+                            });
+                        }
                     }
 
                     const alertText = `🚨 Có khách Hú/Reply kìa sếp!\n\n👤 Từ: ${senderName}\n🏢 Group: ${groupName}\n💬 Trạm gửi: ${me.firstName}\n\n📝 Bình luận: "${text}"${messageLink}`;
@@ -119,6 +184,232 @@ class TelegramMultiClient {
                 }
             } catch(e) { console.error('Inbox Monitor Error:', e); }
         }, new NewMessage({ incoming: true }));
+        console.log('[AILead] Telegram API NewMessage listener active:', {
+            accountId,
+            mode: 'push_realtime',
+            incoming: true,
+            autoReconnect: true,
+        });
+    }
+
+    async scanRecentAiLeadGroupMessagesOnStartup({
+        accountId,
+        client,
+        initialLookback = AI_LEAD_STARTUP_INITIAL_LOOKBACK,
+    }) {
+        const settings = await require('./models/Setting').findOne({
+            type: 'global_app_settings',
+        }).catch(() => null);
+        if (!settings?.aiLeadEnabled || !settings.openaiApiKey) {
+            console.log('[AILead] Startup group scan skipped: AI Lead is disabled or AI API key is missing.');
+            return { success: false, skipped: true, reason: 'disabled_or_missing_key' };
+        }
+
+        const groups = (Array.isArray(settings.aiLeadEngagementGroups)
+            ? settings.aiLeadEngagementGroups
+            : []
+        ).filter((group) => String(group.accountId) === String(accountId));
+        if (!groups.length) {
+            console.log(`[AILead] Startup group scan skipped: no configured groups for account ${accountId}.`);
+            return { success: true, skipped: true, reason: 'no_configured_groups' };
+        }
+
+        console.log('[AILead] Startup group scan started:', {
+            accountId,
+            groups: groups.length,
+            mode: 'catch_up_since_last_processed_message',
+            initialLookback,
+        });
+
+        const items = [];
+        const errors = [];
+        let skippedNonGmail = 0;
+        let fetchedMessages = 0;
+        const maxFetchedMessageIdByChat = new Map();
+        for (const group of groups) {
+            try {
+                const entity = await this.resolveEntity(client, group.chatId);
+                const chatId = String(group.chatId || entity?.id?.toString?.() || '');
+                const [storedCursor, latestQueueMessageId] = await Promise.all([
+                    AiLeadGroupCursor.getMessageId(accountId, chatId),
+                    AiLeadQueue.findLatestNumericMessageId(accountId, chatId),
+                ]);
+                const lastProcessedMessageId = Math.max(storedCursor, latestQueueMessageId);
+                const topics = Array.isArray(group.topics) && group.topics.length
+                    ? group.topics
+                    : [null];
+                const groupMessages = new Map();
+                for (const topic of topics) {
+                    if (lastProcessedMessageId > 0) {
+                        const options = {
+                            minId: lastProcessedMessageId,
+                            limit: AI_LEAD_STARTUP_MAX_MESSAGES_PER_GROUP,
+                            waitTime: 0.2,
+                        };
+                        if (topic?.id) options.replyTo = Number(topic.id);
+                        for await (const message of client.iterMessages(entity, options)) {
+                            const messageId = Number(message?.id || 0);
+                            if (!Number.isSafeInteger(messageId) || messageId <= lastProcessedMessageId) continue;
+                            groupMessages.set(String(messageId), message);
+                        }
+                    } else {
+                        const options = {
+                            limit: Math.max(1, Number(initialLookback || AI_LEAD_STARTUP_INITIAL_LOOKBACK)),
+                        };
+                        if (topic?.id) options.replyTo = Number(topic.id);
+                        const recentMessages = await client.getMessages(entity, options);
+                        for (const message of recentMessages || []) {
+                            const messageId = Number(message?.id || 0);
+                            if (!Number.isSafeInteger(messageId)) continue;
+                            groupMessages.set(String(messageId), message);
+                        }
+                    }
+                }
+
+                const orderedMessages = Array.from(groupMessages.values())
+                    .sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0));
+                fetchedMessages += orderedMessages.length;
+                if (orderedMessages.length > 0) {
+                    maxFetchedMessageIdByChat.set(
+                        chatId,
+                        Number(orderedMessages[orderedMessages.length - 1]?.id || 0),
+                    );
+                }
+                for (const message of orderedMessages) {
+                        const text = String(message?.message || message?.text || '').trim();
+                        if (!containsGmailKeyword(text)) {
+                            skippedNonGmail += 1;
+                            continue;
+                        }
+                        if (!message.chat && typeof message.getChat === 'function') {
+                            await message.getChat().catch(() => null);
+                        }
+                        if (!message.chat) message._chat = entity;
+                        if (!message.sender && typeof message.getSender === 'function') {
+                            await message.getSender().catch(() => null);
+                        }
+                        items.push({
+                            accountId,
+                            client,
+                            message,
+                            queuedAt: Date.now(),
+                            suppressAdminNotifications: true,
+                            cursorChatId: chatId,
+                        });
+                }
+            } catch (err) {
+                errors.push({
+                    chatId: String(group.chatId || ''),
+                    title: group.title || group.username || '',
+                    error: err.message,
+                });
+            }
+            await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+
+        if (!items.length) {
+            for (const [chatId, messageId] of maxFetchedMessageIdByChat.entries()) {
+                await AiLeadGroupCursor.advance(accountId, chatId, messageId);
+            }
+            console.log('[AILead] Startup group scan found no recent messages:', {
+                accountId,
+                groups: groups.length,
+                fetchedMessages,
+                errors: errors.length,
+                skippedNonGmail,
+            });
+            return {
+                success: errors.length === 0,
+                received: 0,
+                fetchedMessages,
+                errors,
+                skippedNonGmail,
+            };
+        }
+
+        const aiLeadService = require('./aiLeadService');
+        const aggregate = {
+            success: errors.length === 0,
+            reason: 'startup_catch_up',
+            received: 0,
+            eligible: 0,
+            queued: 0,
+            sent: 0,
+            ignored: 0,
+            ignoredReasons: {},
+            ignoredSamples: {},
+            errors: [],
+        };
+        let allBatchesProcessed = true;
+
+        for (let offset = 0; offset < items.length; offset += AI_LEAD_STARTUP_AI_BATCH_SIZE) {
+            const batch = items.slice(offset, offset + AI_LEAD_STARTUP_AI_BATCH_SIZE);
+            try {
+                const result = await aiLeadService.processBufferedGroupMessages({
+                    items: batch,
+                    reason: 'startup_catch_up',
+                });
+                aggregate.success = aggregate.success && result.success !== false;
+                for (const key of ['received', 'eligible', 'queued', 'sent', 'ignored']) {
+                    aggregate[key] += Number(result[key] || 0);
+                }
+                for (const [reason, count] of Object.entries(result.ignoredReasons || {})) {
+                    aggregate.ignoredReasons[reason] =
+                        (aggregate.ignoredReasons[reason] || 0) + Number(count || 0);
+                }
+                aggregate.errors.push(...(result.errors || []));
+                const processedMaxByChat = new Map();
+                for (const item of batch) {
+                    const chatId = String(item.cursorChatId || '');
+                    const messageId = Number(item.message?.id || 0);
+                    if (!chatId || !Number.isSafeInteger(messageId)) continue;
+                    processedMaxByChat.set(
+                        chatId,
+                        Math.max(processedMaxByChat.get(chatId) || 0, messageId),
+                    );
+                }
+                for (const [chatId, messageId] of processedMaxByChat.entries()) {
+                    await AiLeadGroupCursor.advance(accountId, chatId, messageId);
+                }
+            } catch (err) {
+                const retryable = isRetryableAiError(err);
+                const requeued = retryable ? this.requeueAiLeadGroupItems(batch) : 0;
+                aggregate.success = false;
+                allBatchesProcessed = false;
+                aggregate.errors.push(err.message);
+                console.error('[AILead] Startup catch-up AI batch failed:', {
+                    offset,
+                    batchSize: batch.length,
+                    error: err.message,
+                    retryable,
+                    requeued,
+                    retryInMs: requeued > 0 ? 60000 : 0,
+                });
+                break;
+            }
+        }
+        if (allBatchesProcessed) {
+            for (const [chatId, messageId] of maxFetchedMessageIdByChat.entries()) {
+                await AiLeadGroupCursor.advance(accountId, chatId, messageId);
+            }
+        }
+
+        console.log('[AILead] Startup group scan finished:', {
+            accountId,
+            groups: groups.length,
+            fetchedMessages,
+            gmailItems: items.length,
+            errors: errors.length,
+            skippedNonGmail,
+            result: aggregate,
+        });
+        return {
+            ...aggregate,
+            fetched: items.length,
+            fetchedMessages,
+            skippedNonGmail,
+            groupErrors: errors,
+        };
     }
 
     getAiLeadGroupBufferKey(accountId, message) {
@@ -147,13 +438,14 @@ class TelegramMultiClient {
 
     enqueueAiLeadGroupMessage({ accountId, client, message }) {
         if (!message || message.out) return;
+        const text = String(message.message || message.text || '').trim();
+        if (!containsGmailKeyword(text)) return;
         const bufferKey = this.getAiLeadGroupBufferKey(accountId, message);
         const buffer = this.aiLeadGroupBuffers.get(bufferKey) || [];
         buffer.push({ accountId, client, message, queuedAt: Date.now() });
         this.aiLeadGroupBuffers.set(bufferKey, buffer);
         const chat = message.chat || {};
         const sender = message.sender || {};
-        const text = (message.message || message.text || '').trim();
         console.log('[AILead] Group message buffered:', {
             accountId,
             chatId: message.chatId?.toString?.() || '',
@@ -171,14 +463,60 @@ class TelegramMultiClient {
         this.scheduleAiLeadGroupFairFlush(
             buffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
                 ? 'count_batch_limit'
-                : 'timer_60s',
+                : 'timer_10s',
             buffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
                 ? AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS
                 : AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS,
         );
     }
 
-    scheduleAiLeadGroupFairFlush(reason = 'timer_60s', delayMs = AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS) {
+    async advanceAiLeadGroupCursors(items = []) {
+        const maxByGroup = new Map();
+        for (const item of items) {
+            const accountId = String(item?.accountId || '');
+            const message = item?.message;
+            const chatId = String(
+                item?.cursorChatId ||
+                message?.chatId?.toString?.() ||
+                message?.peerId?.channelId?.toString?.() ||
+                message?.peerId?.chatId?.toString?.() ||
+                '',
+            );
+            const messageId = Number(message?.id || 0);
+            if (!accountId || !chatId || !Number.isSafeInteger(messageId)) continue;
+            const key = `${accountId}:${chatId}`;
+            const current = maxByGroup.get(key);
+            if (!current || messageId > current.messageId) {
+                maxByGroup.set(key, { accountId, chatId, messageId });
+            }
+        }
+        for (const cursor of maxByGroup.values()) {
+            await AiLeadGroupCursor.advance(
+                cursor.accountId,
+                cursor.chatId,
+                cursor.messageId,
+            );
+        }
+    }
+
+    requeueAiLeadGroupItems(items = [], delayMs = 60000) {
+        let requeued = 0;
+        for (const item of items) {
+            const retryCount = Number(item.aiRetryCount || 0);
+            if (retryCount >= 3) continue;
+            const bufferKey = this.getAiLeadGroupBufferKey(item.accountId, item.message);
+            const buffer = this.aiLeadGroupBuffers.get(bufferKey) || [];
+            buffer.unshift({ ...item, aiRetryCount: retryCount + 1 });
+            this.aiLeadGroupBuffers.set(bufferKey, buffer);
+            requeued += 1;
+        }
+        if (requeued > 0) {
+            this.scheduleAiLeadGroupFairFlush('ai_api_retry', delayMs);
+        }
+        return requeued;
+    }
+
+    scheduleAiLeadGroupFairFlush(reason = 'timer_10s', delayMs = AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS) {
         const dueAt = Date.now() + Math.max(0, delayMs);
         if (this.aiLeadGroupFairFlushTimer) {
             if (this.aiLeadGroupFairFlushDueAt && this.aiLeadGroupFairFlushDueAt <= dueAt) return;
@@ -195,7 +533,7 @@ class TelegramMultiClient {
         }, Math.max(0, delayMs));
     }
 
-    async flushAiLeadGroupBuffersFair(reason = 'timer_60s') {
+    async flushAiLeadGroupBuffersFair(reason = 'timer_10s') {
         const settings = await require('./models/Setting').findOne({ type: 'global_app_settings' }).catch(() => null);
         const keys = Array.from(this.aiLeadGroupBuffers.keys())
             .filter((key) => {
@@ -234,9 +572,28 @@ class TelegramMultiClient {
             });
             const result = await aiLeadService.processBufferedGroupMessages({ items: mergedItems, reason: `${reason}_fair_merged` });
             console.log('[AILead] Fair group buffers flushed:', JSON.stringify({ groups: selected.length, ...result }, null, 2));
+            if (result?.success !== false) {
+                await this.advanceAiLeadGroupCursors(mergedItems);
+            }
             const now = Date.now();
             for (const entry of selected) this.aiLeadGroupLastFlushAt.set(entry.key, now);
             return { success: true, reason, groups: selected.length, results: [result] };
+        } catch (err) {
+            const retryable = isRetryableAiError(err);
+            const requeued = retryable ? this.requeueAiLeadGroupItems(mergedItems) : 0;
+            console.error('[AILead] Fair group buffer AI call failed:', {
+                error: err.message,
+                retryable,
+                requeued,
+                retryInMs: requeued > 0 ? 60000 : 0,
+            });
+            return {
+                success: false,
+                reason,
+                groups: selected.length,
+                error: err.message,
+                requeued,
+            };
         } finally {
             for (const entry of selected) this.aiLeadGroupFlushRunning.delete(entry.key);
             const remainingKeys = Array.from(this.aiLeadGroupBuffers.keys()).filter((key) => {
@@ -277,8 +634,27 @@ class TelegramMultiClient {
             console.log('[AILead] Flushing group buffer:', { reason, bufferKey, items: items.length, remaining: buffer.length });
             const result = await aiLeadService.processBufferedGroupMessages({ items, reason });
             console.log('[AILead] Group buffer flushed:', JSON.stringify({ bufferKey, ...result }, null, 2));
+            if (result?.success !== false) {
+                await this.advanceAiLeadGroupCursors(items);
+            }
             this.aiLeadGroupLastFlushAt.set(bufferKey, Date.now());
             return result;
+        } catch (err) {
+            const retryable = isRetryableAiError(err);
+            const requeued = retryable ? this.requeueAiLeadGroupItems(items) : 0;
+            console.error('[AILead] Group buffer AI call failed:', {
+                bufferKey,
+                error: err.message,
+                retryable,
+                requeued,
+                retryInMs: requeued > 0 ? 60000 : 0,
+            });
+            return {
+                success: false,
+                bufferKey,
+                error: err.message,
+                requeued,
+            };
         } finally {
             this.aiLeadGroupFlushRunning.delete(bufferKey);
             const nextBuffer = this.aiLeadGroupBuffers.get(bufferKey) || [];
@@ -286,7 +662,7 @@ class TelegramMultiClient {
                 this.scheduleAiLeadGroupFairFlush(
                     nextBuffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
                         ? 'count_batch_limit_followup'
-                        : 'timer_60s_followup',
+                        : 'timer_10s_followup',
                     nextBuffer.length >= AI_LEAD_GROUP_BUFFER_BATCH_SIZE
                         ? AI_LEAD_GROUP_FAIR_FLUSH_FAST_MS
                         : AI_LEAD_GROUP_FAIR_FLUSH_INTERVAL_MS,
@@ -405,8 +781,10 @@ class TelegramMultiClient {
             const settings = await GlobalSetting.findOne({ type: "global_app_settings" }).catch(() => null);
             if (settings && settings.aiLeadUserReplyEnabled === true && settings.openaiApiKey) {
                 this.startAiLeadPrivateInboxWatcher().catch((err) => console.error('[AILead] Watcher start error:', err.message));
+            } else if (!settings?.openaiApiKey) {
+                console.log('[AILead] Private inbox watcher not started: AI API key is not configured.');
             } else {
-                console.log('[AILead] Private inbox watcher is disabled or OpenAI API key is missing. Skipping watcher start.');
+                console.log('[AILead] Private inbox watcher not started: private auto-reply is disabled.');
             }
         } catch(err) {
             console.error('[TelegramService] DB Init error:', err);
@@ -488,6 +866,15 @@ class TelegramMultiClient {
                     })
                     .catch((err) => console.error('[AILead] Startup private unread scan error:', err.message));
             }, 5000);
+
+            setTimeout(() => {
+                this.scanRecentAiLeadGroupMessagesOnStartup({
+                    accountId: account.id,
+                    client,
+                }).catch((err) => {
+                    console.error('[AILead] Startup group scan error:', err.message);
+                });
+            }, 1500);
 
             return accInfo;
         } catch (err) {
